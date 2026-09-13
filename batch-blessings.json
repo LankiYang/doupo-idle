@@ -1,0 +1,52 @@
+[
+  {
+    "name": "祝福·剑意冲霄",
+    "out": "blessings/sword.png",
+    "prompt": "A single glowing ascending sword wrapped in swirling crimson-orange qi energy flames, radiating power lines upward, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·金钟罩",
+    "out": "blessings/bell.png",
+    "prompt": "A bronze-gold Buddhist temple bell radiating a translucent blue protective energy shield dome around it, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·气血如龙",
+    "out": "blessings/dragonblood.png",
+    "prompt": "A small jade-red serpentine dragon coiling protectively around a glowing crimson life-energy orb, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·噬血大法",
+    "out": "blessings/lifesteal.png",
+    "prompt": "A single large crimson blood droplet with dark purple-black smoky energy swirling around it, ominous magical glow, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·鹰眼诀",
+    "out": "blessings/eagle.png",
+    "prompt": "A stylized golden hawk eye emblem with sharp piercing amber iris and feather patterns radiating outward, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·破甲式",
+    "out": "blessings/pierce.png",
+    "prompt": "A cracked shattering steel armor plate pierced by a bright orange energy spike bursting through it, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·疾风步",
+    "out": "blessings/wind.png",
+    "prompt": "Swirling pale cyan-green wind currents forming a spiral gust with a few leaf petals caught in the flow, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·寻宝鼠",
+    "out": "blessings/mouse.png",
+    "prompt": "A cute chibi golden treasure mouse creature hugging a glowing gold ingot and coin, sparkling aura, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·点金手",
+    "out": "blessings/gold.png",
+    "prompt": "An open palm hand mid-transformation into glittering gold dust and coins cascading from the fingertips, warm golden glow, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  },
+  {
+    "name": "祝福·顿悟",
+    "out": "blessings/insight.png",
+    "prompt": "A glowing golden lotus flower blooming around a radiant enlightenment orb of light, soft rays emanating outward, serene Daoist mystical symbol, fantasy RPG skill icon, centered composition, flat solid dark background for easy cutout, no text, no border frame, clean vector-like edges, vibrant colors, Chinese xuanhuan cultivation theme, semi-realistic painterly icon art"
+  }
+]
