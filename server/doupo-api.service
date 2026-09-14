@@ -1,0 +1,18 @@
+[Unit]
+Description=Doupo Idle (焚炎异录) Leaderboard API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/doupo-game/api
+ExecStart=/usr/local/bin/node /opt/doupo-game/api/server.js
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/doupo-api.log
+StandardError=append:/var/log/doupo-api.log
+# 仅监听 127.0.0.1，对外只经 nginx 反代；轻量基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
