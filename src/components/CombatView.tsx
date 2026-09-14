@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useGame, game, charLabel, charStats, rarityInfo, itemLabel, nextGuides, fmtNum, type CombatEvent, type GameState } from '../game/engine'
 import { portraitFor } from '../game/portraits'
 import { monsterSpriteFor } from '../game/monsters'
@@ -94,7 +95,8 @@ function FighterCard({ id, state, now, monsterAtkStyle }: { id: string | null; s
 
 export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => void }) {
   const state = useGame()
-  const stage = state.stage
+  const farming = state.farmStage !== null
+  const stage = state.farmStage ?? state.stage
   const zone = zoneForStage(stage)
   const monsterDef = monsterForStage(stage)
   const monster = stageStats(stage)
@@ -103,6 +105,16 @@ export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => v
   const scene = sceneFor(zone.id)
   const now = Date.now()
   const atkStyle = monsterDef.atkStyle ?? 'melee'
+
+  // 刷材料选关：目标关卡本地状态，默认选「生涯最高关 − 1」（卡关时刚好能稳定刷的最后一关）
+  const maxFarm = Math.max(1, state.highestStage)
+  const [targetRaw, setTargetRaw] = useState(() => Math.max(1, state.highestStage - 1))
+  const target = Math.min(Math.max(1, targetRaw), maxFarm)
+  const setTarget = (n: number) => setTargetRaw(Math.min(Math.max(1, n), maxFarm))
+  const tZone = zoneForStage(target)
+  const tMonster = monsterForStage(target)
+  const tBoss = isBossStage(target)
+  const tDrops = tZone.drops.filter(d => d.item !== 'coin')
 
   const mainEvents = state.combatEvents.filter(e => e.source === 'main')
   useCombatSound(mainEvents)
@@ -119,10 +131,59 @@ export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => v
     <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 sm:flex-row sm:gap-4 sm:p-4">
       <div className="shrink-0 space-y-2 sm:w-56">
         <div className="dq-panel rounded-md p-3 text-center">
-          <div className="text-xs text-[#a89478]">当前关卡</div>
+          <div className="text-xs text-[#a89478]">{farming ? '自选关卡' : '主线关卡'}</div>
           <div className="text-3xl text-dq-gold">{stage}</div>
-          <div className="text-xs text-[#a89478]">生涯最高 {state.highestStage}</div>
+          <div className="text-xs text-[#a89478]">
+            {farming ? `主线停在第 ${state.stage} 关` : `生涯最高 ${state.highestStage}`}
+          </div>
         </div>
+
+        {state.highestStage >= 2 && (
+          <div className="dq-panel rounded-md p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-sm text-dq-gold">选择关卡</span>
+              {farming && <span className="rounded bg-dq-fire px-1.5 py-0.5 text-[10px] text-black">主线已暂停</span>}
+            </div>
+
+            <div className="mb-2 flex items-center gap-1">
+              <button onClick={() => setTarget(target - 5)} className="w-8 rounded border border-dq-border px-1 py-1 text-xs text-[#a89478] hover:text-dq-gold">−5</button>
+              <button onClick={() => setTarget(target - 1)} className="w-7 rounded border border-dq-border px-1 py-1 text-sm text-[#a89478] hover:text-dq-gold">−</button>
+              <div className="flex-1 text-center text-xl text-dq-gold">{target}</div>
+              <button onClick={() => setTarget(target + 1)} className="w-7 rounded border border-dq-border px-1 py-1 text-sm text-[#a89478] hover:text-dq-gold">＋</button>
+              <button onClick={() => setTarget(target + 5)} className="w-8 rounded border border-dq-border px-1 py-1 text-xs text-[#a89478] hover:text-dq-gold">＋5</button>
+            </div>
+
+            <div className="mb-2 text-[11px] leading-relaxed text-[#a89478]">
+              <span className="text-[#e8dcc8]">{tZone.name} · {tMonster.name}</span>
+              {tBoss && <span className="ml-1 rounded bg-dq-fire px-1 text-[10px] text-black">首领</span>}
+              <div className="mt-0.5">掉落：🪙灵金 💎结晶{tDrops.length > 0 ? ' ' + tDrops.map(d => itemLabel(d.item).icon + itemLabel(d.item).name).join(' ') : ''}</div>
+            </div>
+
+            <div className="mb-2 flex flex-wrap gap-1">
+              {MAPS.filter(m => state.highestStage >= m.levelReq).map(m => (
+                <button key={m.id} onClick={() => setTarget(m.levelReq)}
+                  className={`rounded border px-1.5 py-0.5 text-[10px] ${tZone.id === m.id ? 'border-dq-gold text-dq-gold' : 'border-dq-border text-[#a89478] hover:text-dq-gold'}`}>
+                  {m.name}
+                </button>
+              ))}
+            </div>
+
+            <div className="space-y-1">
+              {farming && (
+                <button onClick={() => game.setFarmStage(null)}
+                  className="w-full rounded bg-dq-gold px-3 py-2 text-sm text-black">
+                  返回主线（第 {state.stage} 关）
+                </button>
+              )}
+              <button onClick={() => game.setFarmStage(target)}
+                disabled={farming && state.farmStage === target}
+                className="w-full rounded bg-dq-fire px-3 py-2 text-sm text-black disabled:opacity-40">
+                {farming && state.farmStage === target ? `正在第 ${target} 关战斗` : `前往第 ${target} 关战斗`}
+              </button>
+            </div>
+            <div className="mt-1.5 text-[10px] text-[#5a4a38]">在自选关卡战斗只拿掉落、不推进主线，练强后点「返回主线」继续闯关</div>
+          </div>
+        )}
 
         <div className="dq-panel rounded-md p-3">
           <div className="mb-2 text-sm text-dq-gold">江湖路线</div>
@@ -154,6 +215,7 @@ export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => v
           <div className="text-dq-gold">
             {zone.name} · 第 {stage} 关 · {monsterDef.name}
             {boss && <span className="ml-2 rounded bg-dq-fire px-1.5 py-0.5 text-xs text-black">首领</span>}
+            {farming && <span className="ml-2 rounded bg-dq-gold px-1.5 py-0.5 text-xs text-black">自选关卡</span>}
           </div>
           <div className="text-xs text-[#a89478] sm:text-sm">累计击杀 {state.kills}</div>
         </div>

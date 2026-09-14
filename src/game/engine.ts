@@ -56,6 +56,7 @@ export interface GameState {
   autoBattle: boolean
   stage: number
   highestStage: number
+  farmStage: number | null // 刷材料模式：固定停留在此关卡反复刷掉落；null = 正常主线推进
   wipeStage: number | null // 当前连续团灭发生在哪一关
   wipeStreak: number // 在 wipeStage 上连续团灭了几次
   lastProgressAt: number // 上次推进关卡的时间戳：用于识别"打不死也死不了"的僵持卡关
@@ -89,6 +90,7 @@ function freshState(): GameState {
     autoBattle: false,
     stage: 1,
     highestStage: 1,
+    farmStage: null,
     wipeStage: null,
     wipeStreak: 0,
     lastProgressAt: Date.now(),
@@ -166,6 +168,8 @@ class GameStore {
           inventory: { ...base.inventory, ...parsed.inventory },
           stage: parsed.stage ?? base.stage,
           highestStage: parsed.highestStage ?? parsed.stage ?? base.highestStage,
+          farmStage: (typeof parsed.farmStage === 'number' && parsed.farmStage >= 1 &&
+            parsed.farmStage <= (parsed.highestStage ?? parsed.stage ?? base.highestStage)) ? parsed.farmStage : null,
           lastProgressAt: parsed.lastProgressAt ?? Date.now(),
           lab: { ...base.lab, ...parsed.lab, battle: null },
           combatEvents: [],
@@ -320,6 +324,28 @@ class GameStore {
     return [...this.state.team.front, ...this.state.team.back].filter((x): x is string => !!x)
   }
 
+  /** 当前实际交战的关卡：刷材料模式下是 farmStage，否则是主线推进的 stage */
+  private fightStage(): number {
+    return this.state.farmStage ?? this.state.stage
+  }
+
+  /**
+   * 设置/清除「刷材料」关卡——解决卡关后无路可走的问题。
+   * 卡在第 N 关打不过时，玩家可回到任意已通关关卡（1..highestStage）反复刷掉落练级；
+   * 刷材料期间主线进度暂停（不推进 stage、不发首通奖励），只结算该关的材料/灵金/装备/结晶掉落。
+   * 传 null 返回主线最新关卡。切换会清空当前战斗，自动出战随即按新关卡重开。
+   */
+  setFarmStage(n: number | null) {
+    if (n === null) {
+      this.state.farmStage = null
+      this.state.lastProgressAt = Date.now() // 返回主线重置僵持计时，避免立刻误报卡关
+    } else {
+      this.state.farmStage = Math.max(1, Math.min(Math.floor(n), this.state.highestStage))
+    }
+    this.state.battle = null
+    this.emit()
+  }
+
   startBattle() {
     const fighters = this.activeFighters()
     if (fighters.length === 0) { this.setNotice('请先编排阵容'); return }
@@ -329,7 +355,7 @@ class GameStore {
       const cdef = CHAR_MAP[id]
       if (entry && cdef) fighterHp[id] = charStats(entry, cdef, this.fireFor(id)).hp
     }
-    this.state.battle = { monsterHp: stageStats(this.state.stage).hp, roundTimer: ROUND_SEC, fighterHp }
+    this.state.battle = { monsterHp: stageStats(this.fightStage()).hp, roundTimer: ROUND_SEC, fighterHp }
     this.emit()
   }
 
@@ -358,7 +384,7 @@ class GameStore {
   private battleRound() {
     const b = this.state.battle
     if (!b) return
-    const stage = this.state.stage
+    const stage = this.fightStage()
     const monsterDef = monsterForStage(stage)
     const monster = stageStats(stage)
 
@@ -411,7 +437,7 @@ class GameStore {
       this.state.combatEvents.push({ type: 'kill', value: 0, who: monsterDef.name, time: t0 + seq * SEQ_MS, source: 'main', boss: isBossStage(stage) })
       this.onKill()
       if (!this.state.battle) return
-      b.monsterHp = stageStats(this.state.stage).hp
+      b.monsterHp = stageStats(this.fightStage()).hp
       return
     }
 
@@ -433,9 +459,13 @@ class GameStore {
     }
 
     if (!this.anyAlive(b)) {
-      if (this.state.wipeStage === this.state.stage) this.state.wipeStreak += 1
-      else { this.state.wipeStage = this.state.stage; this.state.wipeStreak = 1 }
-      this.setNotice(`全队阵亡，撤退疗伤中…（第 ${this.state.stage} 关已连续 ${this.state.wipeStreak} 次）`)
+      if (this.state.farmStage === null) {
+        if (this.state.wipeStage === stage) this.state.wipeStreak += 1
+        else { this.state.wipeStage = stage; this.state.wipeStreak = 1 }
+        this.setNotice(`全队阵亡，撤退疗伤中…（第 ${stage} 关已连续 ${this.state.wipeStreak} 次）`)
+      } else {
+        this.setNotice(`在第 ${stage} 关战败，换一个低一点的关卡再试`)
+      }
       this.state.battle = null
     }
   }
@@ -453,7 +483,8 @@ class GameStore {
 
   private onKill() {
     this.state.kills++
-    const stage = this.state.stage
+    const farming = this.state.farmStage !== null
+    const stage = this.fightStage()
     const zone = zoneForStage(stage)
     const boss = isBossStage(stage)
     this.state.inventory.crystal = (this.state.inventory.crystal ?? 0) + stageStats(stage).hp / 20
@@ -466,6 +497,8 @@ class GameStore {
       this.state.inventory[d.item] = (this.state.inventory[d.item] ?? 0) + n
       this.state.combatEvents.push({ type: 'drop', value: n, item: d.item, time: Date.now(), source: 'main' })
     }
+    // 刷材料模式：只结算上面的掉落，不推进主线、不发首通奖励（首通奖励仅主线推进时给一次）
+    if (farming) return
     // 首通奖励：缘分丹 + 异火里程碑
     // 缘分丹原先只有初始 5 颗、零产出来源，抽卡开局即死，26 名角色里 18~21 名永久不可得
     const isFirstClear = stage >= this.state.highestStage
@@ -939,13 +972,15 @@ export interface Guide { icon: string; text: string; tab: 'roster' | 'alchemy' |
 export function nextGuides(state: GameState): Guide[] {
   const out: Guide[] = []
 
-  if (state.wipeStreak >= 2) {
-    out.push({ icon: '⚠️', text: `已经连续卡在第 ${state.stage} 关 ${state.wipeStreak} 次了，该去强化队伍了`, tab: 'roster' })
-  } else if (state.battle && Date.now() - state.lastProgressAt > 3 * 60 * 1000) {
-    // 僵持卡关：伤害有 1 点保底、治疗又抵得住反击，于是既打不死也死不了，
-    // wipeStreak 恒为 0 —— 这是后期最难受的状态，但原先完全不给任何提示
-    const mins = Math.floor((Date.now() - state.lastProgressAt) / 60000)
-    out.push({ icon: '🐢', text: `第 ${state.stage} 关已经磨了 ${mins} 分钟还没推进，伤害不足，去强化队伍`, tab: 'roster' })
+  if (state.farmStage === null) {
+    if (state.wipeStreak >= 2) {
+      out.push({ icon: '⚠️', text: `连续卡在第 ${state.stage} 关 ${state.wipeStreak} 次了，去「选择关卡」回旧关练级或强化队伍`, tab: 'roster' })
+    } else if (state.battle && Date.now() - state.lastProgressAt > 3 * 60 * 1000) {
+      // 僵持卡关：伤害有 1 点保底、治疗又抵得住反击，于是既打不死也死不了，
+      // wipeStreak 恒为 0 —— 这是后期最难受的状态，但原先完全不给任何提示
+      const mins = Math.floor((Date.now() - state.lastProgressAt) / 60000)
+      out.push({ icon: '🐢', text: `第 ${state.stage} 关磨了 ${mins} 分钟没推进，去「选择关卡」回旧关练级再回来`, tab: 'roster' })
+    }
   }
 
   // 有角色卡在突破口，且丹药不够
