@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useGame, game, charLabel, rarityInfo, itemLabel, ESSENCE_BY_RARITY } from '../game/engine'
 import { portraitFor } from '../game/portraits'
 import { xpToNext, realmLabel, needsPillFor, pillGradeFor, FIRES, MAX_STARS, starUpCost } from '../game/data'
@@ -149,6 +149,10 @@ function Slot({ charId, active, onClick, onClear }: { charId: string | null; act
 function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'front' | 'back', idx: number) => void; onSold: () => void }) {
   const state = useGame()
   const [trainAmt, setTrainAmt] = useState(100)
+  // 打坐滑条上限快照：斗气结晶每 tick 都在涨，若直接绑定 max/value，滑条会随每次重渲染自己滑动。
+  // 改为仅在挂载/切换角色时快照一次，保持稳定；真正花费时 engine.trainChar 会再按当前结晶取 min，不会超花。
+  const [snapCrystal, setSnapCrystal] = useState(() => Math.max(10, Math.floor(state.inventory.crystal ?? 0)))
+  useEffect(() => { setSnapCrystal(Math.max(10, Math.floor(state.inventory.crystal ?? 0))) }, [id])
   const [confirmSell, setConfirmSell] = useState(false)
   const cdef = charLabel(id)
   const entry = state.roster[id]
@@ -200,11 +204,11 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
         </div>
 
         <div className="mt-3 flex items-center gap-2">
-          <input type="range" min={10} max={Math.max(10, Math.floor(state.inventory.crystal ?? 0))} step={10}
-            value={Math.min(trainAmt, Math.max(10, Math.floor(state.inventory.crystal ?? 0)))}
+          <input type="range" min={10} max={snapCrystal} step={10}
+            value={Math.min(trainAmt, snapCrystal)}
             onChange={e => setTrainAmt(Number(e.target.value))}
             className="flex-1" />
-          <span className="w-20 text-right text-sm">{trainAmt} 结晶</span>
+          <span className="w-20 text-right text-sm">{Math.min(trainAmt, snapCrystal)} 结晶</span>
           <button onClick={() => game.trainChar(id, trainAmt)}
             className="rounded bg-dq-gold px-3 py-1 text-sm text-black">打坐修炼</button>
         </div>
