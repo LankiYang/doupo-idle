@@ -525,3 +525,39 @@ export function equipAffixSum(item: EquipItem, type: AffixType): number {
   for (const a of item.extra) if (a.type === type) sum += a.value
   return sum
 }
+
+// ── 商城：限时增益（花灵金买临时 buff，到期消失，不增加任何存量资源）──────────────
+export type BuffKind = 'crystal' | 'herb' | 'atk' | 'def'
+export interface BuffDef { id: string; name: string; icon: string; desc: string; kind: BuffKind; pct: number; minutes: number }
+export const SHOP_BUFFS: BuffDef[] = [
+  { id: 'juling', name: '聚灵阵', icon: '💎', desc: '斗气结晶挂机产出 +100%', kind: 'crystal', pct: 100, minutes: 30 },
+  { id: 'cuisheng', name: '催生阵', icon: '🌿', desc: '灵药挂机产出 +100%', kind: 'herb', pct: 100, minutes: 30 },
+  { id: 'fengrui', name: '锋锐阵', icon: '🗡️', desc: '全队攻击 +20%', kind: 'atk', pct: 20, minutes: 30 },
+  { id: 'jinzhong', name: '金钟阵', icon: '🛡️', desc: '全队防御 +25%', kind: 'def', pct: 25, minutes: 30 },
+]
+
+// ── 商城：商品（价格 = costMult × 生涯关卡奖励 × growth^当日已购次数，每日 0 点回落）──
+// 不设购买次数上限，纯靠指数递增的价格限制——买得越多越贵，天然挡住"批量白嫖资源"。
+export type ShopGoodKind = 'material' | 'buff' | 'equip'
+export interface ShopGood {
+  id: string; name: string; icon: string; desc: string
+  kind: ShopGoodKind
+  costMult: number   // 基准价倍率（× stageCoinReward(生涯最高关)）
+  growth: number     // 每买一次，价格 ×growth
+  item?: string      // material：资源 id
+  amount?: number    // material：数量
+  buffId?: string    // buff：对应 SHOP_BUFFS.id
+}
+export const SHOP_GOODS: ShopGood[] = [
+  // 限时秘法
+  { id: 'buff_juling', name: '聚灵阵', icon: '💎', desc: '斗气结晶挂机产出 +100%，30 分钟', kind: 'buff', costMult: 12, growth: 1.5, buffId: 'juling' },
+  { id: 'buff_cuisheng', name: '催生阵', icon: '🌿', desc: '灵药挂机产出 +100%，30 分钟', kind: 'buff', costMult: 12, growth: 1.5, buffId: 'cuisheng' },
+  { id: 'buff_fengrui', name: '锋锐阵', icon: '🗡️', desc: '全队攻击 +20%，30 分钟', kind: 'buff', costMult: 14, growth: 1.5, buffId: 'fengrui' },
+  { id: 'buff_jinzhong', name: '金钟阵', icon: '🛡️', desc: '全队防御 +25%，30 分钟', kind: 'buff', costMult: 14, growth: 1.5, buffId: 'jinzhong' },
+  // 奇货可居（养成材料）
+  { id: 'essence', name: '武魂精血 ×30', icon: '🩸', desc: '升星 1~5★ 材料', kind: 'material', costMult: 18, growth: 1.7, item: 'essence', amount: 30 },
+  { id: 'xuanjing', name: '玄晶 ×10', icon: '🔮', desc: '升星 6~10★ 材料', kind: 'material', costMult: 22, growth: 1.7, item: 'xuanjing', amount: 10 },
+  { id: 'yuanfen', name: '缘分丹 ×1', icon: '🎴', desc: '抽卡货币，稀缺，慎买', kind: 'material', costMult: 60, growth: 2.0, item: 'yuanfen', amount: 1 },
+  // 随机装备
+  { id: 'equip', name: '随机装备 ×1', icon: '🎁', desc: '随机槽位 + 随机品阶（与战斗掉落同品质池）', kind: 'equip', costMult: 40, growth: 1.6 },
+]

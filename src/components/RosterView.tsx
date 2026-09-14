@@ -5,6 +5,12 @@ import { xpToNext, realmLabel, needsPillFor, pillGradeFor, FIRES, MAX_STARS, sta
 
 type AssignTarget = { row: 'front' | 'back'; index: number } | null
 
+/** 星级字形：clamp 到 [0, MAX_STARS]，杜绝 repeat(负数) 崩溃（升星上限已是 10★，旧代码硬编码 5 会在 6★+ 时炸） */
+function starGlyphs(stars: number): string {
+  const s = Math.max(0, Math.min(MAX_STARS, Math.floor(stars) || 0))
+  return '★'.repeat(s) + '☆'.repeat(MAX_STARS - s)
+}
+
 export default function RosterView() {
   const state = useGame()
   const [selected, setSelected] = useState<string | null>(null)
@@ -170,7 +176,7 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
           </div>
           <div className="text-right">
             <div className="text-dq-gold">{realmLabel(entry.level)}</div>
-            <div className="text-sm text-[#a89478]">{'★'.repeat(entry.stars)}{'☆'.repeat(5 - entry.stars)}</div>
+            <div className="text-sm text-[#a89478]">{starGlyphs(entry.stars)}</div>
           </div>
         </div>
 

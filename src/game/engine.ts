@@ -7,7 +7,8 @@ import {
   labStats, isLabBoss, labDaolingReward,
   MAX_STARS, starUpCost, SHENG_SHARD_COST,
   rollEquip, rollEquipQuality, equipAffixSum,
-  type CharacterDef, type Rarity, type EquipSlot, type EquipItem,
+  SHOP_BUFFS, SHOP_GOODS,
+  type CharacterDef, type Rarity, type EquipSlot, type EquipItem, type BuffKind,
 } from './data'
 import { playSound } from './sound'
 
@@ -45,6 +46,7 @@ export interface LabState {
   highestFloor: number
   blessings: string[] // 本次爬塔已选祝福，撤退/阵亡清空
   offer: string[] | null // 三选一待选
+  offerAt: number // offer 弹出时间戳：超过 LAB_OFFER_TIMEOUT 未选则自动选，避免永久卡住爬塔
 }
 
 export interface GameState {
@@ -68,10 +70,17 @@ export interface GameState {
   lastTick: number
   combatEvents: CombatEvent[]
   equipBag: EquipItem[]
+  buffs: ActiveBuff[] // 商城限时增益（到期自动失效）
+  shop: { date: string; counts: Record<string, number> } // 当日各商品已购次数，驱动价格递增、跨天回落
 }
+
+/** 商城限时增益：id 对应 SHOP_BUFFS，expireAt 为失效时间戳 */
+export interface ActiveBuff { id: string; expireAt: number }
 
 const SAVE_KEY = 'doupo-idle-save-v1'
 const ROUND_SEC = 2
+/** 天梯塔三选一祝福自动选择倒计时(ms)：超时未选则随机自动选一个，不卡住玩家 */
+export const LAB_OFFER_TIMEOUT = 20000
 const CHAR_MAP: Record<string, CharacterDef> = Object.fromEntries(CHARACTERS.map(c => [c.id, c]))
 /** 重复抽到 / 主动卖出角色换取的武魂精血，按稀有度分级 */
 export const ESSENCE_BY_RARITY: Record<Rarity, number> = { yellow: 5, xuan: 10, di: 20, tian: 35, quasi: 60, sheng: 100 }
@@ -94,7 +103,7 @@ function freshState(): GameState {
     wipeStage: null,
     wipeStreak: 0,
     lastProgressAt: Date.now(),
-    lab: { battle: null, autoLab: false, highestFloor: 0, blessings: [], offer: null },
+    lab: { battle: null, autoLab: false, highestFloor: 0, blessings: [], offer: null, offerAt: 0 },
     kills: 0,
     pityCommon: 0,
     pityRare: 0,
@@ -102,6 +111,8 @@ function freshState(): GameState {
     lastTick: Date.now(),
     combatEvents: [],
     equipBag: [],
+    buffs: [],
+    shop: { date: new Date().toDateString(), counts: {} },
   }
 }
 
@@ -142,6 +153,7 @@ export function charStats(entry: RosterEntry, charDef: CharacterDef, fireId: str
 class GameStore {
   state: GameState
   private listeners = new Set<() => void>()
+  private saveSuspended = false // 恢复云存档时挂起本地保存，避免 reload 的 beforeunload/定时 save 覆盖刚写入的存档
 
   constructor() {
     this.state = this.load()
@@ -152,36 +164,82 @@ class GameStore {
   }
 
   private load(): GameState {
-    try {
-      const raw = localStorage.getItem(SAVE_KEY)
-      if (raw) {
-        const parsed = JSON.parse(raw) as GameState
-        const base = freshState()
-        const roster: Record<string, RosterEntry> = { ...base.roster, ...parsed.roster }
-        // 老存档的角色条目没有 equip 字段，逐个补上，否则 charStats 里访问 entry.equip[slot] 会崩
-        for (const id of Object.keys(roster)) roster[id] = { ...roster[id], equip: roster[id].equip ?? {} }
-        return {
-          ...base,
-          ...parsed,
-          roster,
-          team: parsed.team ?? base.team,
-          inventory: { ...base.inventory, ...parsed.inventory },
-          stage: parsed.stage ?? base.stage,
-          highestStage: parsed.highestStage ?? parsed.stage ?? base.highestStage,
-          farmStage: (typeof parsed.farmStage === 'number' && parsed.farmStage >= 1 &&
-            parsed.farmStage <= (parsed.highestStage ?? parsed.stage ?? base.highestStage)) ? parsed.farmStage : null,
-          lastProgressAt: parsed.lastProgressAt ?? Date.now(),
-          lab: { ...base.lab, ...parsed.lab, battle: null },
-          combatEvents: [],
-          equipBag: parsed.equipBag ?? [],
-        }
-      }
-    } catch { /* ignore */ }
+    // 依次尝试：主存档 → 上一份备份 → 全新存档。任何一份损坏都自动跳过，绝不因抛错丢进度。
+    for (const key of [SAVE_KEY, SAVE_KEY + '.bak']) {
+      try {
+        const raw = localStorage.getItem(key)
+        if (!raw) continue
+        const migrated = this.migrate(JSON.parse(raw))
+        if (migrated) return migrated
+      } catch { /* 这份存档损坏，尝试下一份 */ }
+    }
     return freshState()
   }
 
+  /**
+   * 把任意（可能来自旧版本、或部分字段损坏的）存档对象迁移成完整 GameState。
+   * 逐字段容错：单条坏数据只丢弃该条，绝不让整体抛错回退到全新存档（那才是真·死档）。
+   * 无法挽救（根本不是对象）时返回 null，由 load 尝试下一份备份。
+   */
+  private migrate(parsed: Partial<GameState> | null): GameState | null {
+    if (!parsed || typeof parsed !== 'object') return null
+    const base = freshState()
+
+    // 名册：逐条补齐字段、剔除非法条目
+    const roster: Record<string, RosterEntry> = {}
+    const srcRoster = (parsed.roster && typeof parsed.roster === 'object') ? parsed.roster : {}
+    for (const id of Object.keys(srcRoster)) {
+      const e = srcRoster[id] as Partial<RosterEntry> | undefined
+      if (!e || typeof e !== 'object') continue
+      roster[id] = {
+        level: Number.isFinite(e.level as number) ? (e.level as number) : 1,
+        xp: Number.isFinite(e.xp as number) ? (e.xp as number) : 0,
+        stars: Number.isFinite(e.stars as number) ? (e.stars as number) : 0,
+        equip: (e.equip && typeof e.equip === 'object') ? e.equip : {},
+      }
+    }
+    // 空名册会导致无法出战的软锁，兜底塞回一个初始角色
+    if (Object.keys(roster).length === 0) roster.yellow_disciple = { ...base.roster.yellow_disciple }
+
+    const team = (parsed.team && Array.isArray(parsed.team.front) && Array.isArray(parsed.team.back))
+      ? { front: parsed.team.front.slice(0, 3), back: parsed.team.back.slice(0, 2) }
+      : base.team
+    const highestStage = Number.isFinite(parsed.highestStage as number) ? (parsed.highestStage as number)
+      : (Number.isFinite(parsed.stage as number) ? (parsed.stage as number) : base.highestStage)
+
+    return {
+      ...base,
+      ...parsed,
+      roster,
+      team,
+      battle: null,
+      inventory: { ...base.inventory, ...(parsed.inventory ?? {}) },
+      stage: Number.isFinite(parsed.stage as number) ? (parsed.stage as number) : base.stage,
+      highestStage,
+      farmStage: (typeof parsed.farmStage === 'number' && parsed.farmStage >= 1 && parsed.farmStage <= highestStage) ? parsed.farmStage : null,
+      lastProgressAt: Number.isFinite(parsed.lastProgressAt as number) ? (parsed.lastProgressAt as number) : Date.now(),
+      lab: { ...base.lab, ...(parsed.lab ?? {}), battle: null },
+      combatEvents: [],
+      equipBag: Array.isArray(parsed.equipBag) ? parsed.equipBag : [],
+      buffs: Array.isArray(parsed.buffs) ? parsed.buffs.filter(b => b && typeof b.expireAt === 'number' && b.expireAt > Date.now()) : [],
+      shop: (parsed.shop && typeof parsed.shop.counts === 'object' && parsed.shop.counts)
+        ? { date: parsed.shop.date, counts: parsed.shop.counts }
+        : { date: new Date().toDateString(), counts: {} },
+    }
+  }
+
+  /** 挂起本地保存：恢复云存档前调用，防止 reload 时 beforeunload 的 save 把旧内存态写回覆盖 */
+  suspendSave() { this.saveSuspended = true }
+
   save() {
-    try { localStorage.setItem(SAVE_KEY, JSON.stringify(this.state)) } catch { /* ignore */ }
+    if (this.saveSuspended) return
+    try {
+      const next = JSON.stringify(this.state)
+      // 写入前先把上一份完好存档备份到 .bak：主存档万一写坏，下次启动可回退，杜绝死档
+      const prev = localStorage.getItem(SAVE_KEY)
+      if (prev && prev !== next) localStorage.setItem(SAVE_KEY + '.bak', prev)
+      localStorage.setItem(SAVE_KEY, next)
+    } catch { /* ignore（如隐私模式/超额）*/ }
   }
 
   subscribe = (fn: () => void) => {
@@ -229,8 +287,12 @@ class GameStore {
     const dt = Math.min((nowMs - this.state.lastTick) / 1000, 5)
     this.state.lastTick = nowMs
 
-    this.state.inventory.crystal = (this.state.inventory.crystal ?? 0) + this.crystalPerSec() * dt
-    this.state.inventory.herb = (this.state.inventory.herb ?? 0) + this.herbPerSec() * dt
+    // 限时增益：先剔除已过期的，再按生效中的倍率加成挂机产出
+    if (this.state.buffs.some(b => b.expireAt <= nowMs)) {
+      this.state.buffs = this.state.buffs.filter(b => b.expireAt > nowMs)
+    }
+    this.state.inventory.crystal = (this.state.inventory.crystal ?? 0) + this.crystalPerSec() * this.buffMult('crystal') * dt
+    this.state.inventory.herb = (this.state.inventory.herb ?? 0) + this.herbPerSec() * this.buffMult('herb') * dt
 
     if (this.state.battle) {
       this.state.battle.roundTimer -= dt
@@ -240,6 +302,11 @@ class GameStore {
       }
     } else if (this.state.autoBattle) {
       this.startBattle()
+    }
+
+    // 天梯塔三选一祝福：超过 20s 未选则自动随机选一个，避免玩家不在/没注意时被永久卡住
+    if (this.state.lab.offer && Date.now() - (this.state.lab.offerAt || 0) >= LAB_OFFER_TIMEOUT) {
+      this.autoResolveOffer()
     }
 
     if (this.state.lab.battle && !this.state.lab.offer) {
@@ -387,6 +454,8 @@ class GameStore {
     const stage = this.fightStage()
     const monsterDef = monsterForStage(stage)
     const monster = stageStats(stage)
+    const atkBuff = this.buffMult('atk')
+    const defBuff = this.buffMult('def')
 
     // 我方行动：输出角色打怪，治疗角色回复队友
     // 演出节奏：每个出手事件的 time 依次错开 SEQ_MS，UI 只播放 time 已到的事件，形成"依次出手"而非全员同帧
@@ -424,7 +493,7 @@ class GameStore {
         }
         continue
       }
-      let dmg = Math.max(1, Math.round((stats.atk - monster.def * 0.6) * (0.85 + Math.random() * 0.3)))
+      let dmg = Math.max(1, Math.round((stats.atk * atkBuff - monster.def * 0.6) * (0.85 + Math.random() * 0.3)))
       const crit = Math.random() * 100 < stats.critRate
       if (crit) dmg = Math.round(dmg * (1 + stats.critDmg / 100))
       totalDmg += dmg
@@ -448,7 +517,7 @@ class GameStore {
       const entry = this.state.roster[targetId]
       if (cdef && entry) {
         const stats = charStats(entry, cdef, this.fireFor(targetId))
-        const mdmg = Math.max(0, Math.round((monster.atk - stats.def) * (0.85 + Math.random() * 0.3)))
+        const mdmg = Math.max(0, Math.round((monster.atk - stats.def * defBuff) * (0.85 + Math.random() * 0.3)))
         b.fighterHp[targetId] = Math.max(0, (b.fighterHp[targetId] ?? 0) - mdmg)
         const tCounter = t0 + seq * SEQ_MS + 120
         this.state.combatEvents.push({ type: 'monsterDmg', value: mdmg, who: targetId, time: tCounter, source: 'main' })
@@ -551,8 +620,8 @@ class GameStore {
     const base = charStats(entry, cdef, this.fireFor(id))
     const bt = this.blessingTotals()
     return {
-      atk: Math.round(base.atk * (1 + bt.atkPct / 100)),
-      def: Math.round(base.def * (1 + bt.defPct / 100)),
+      atk: Math.round(base.atk * (1 + bt.atkPct / 100) * this.buffMult('atk')),
+      def: Math.round(base.def * (1 + bt.defPct / 100) * this.buffMult('def')),
       hp: Math.round(base.hp * (1 + bt.hpPct / 100)),
       critRate: base.critRate,
       critDmg: base.critDmg,
@@ -717,6 +786,7 @@ class GameStore {
       }
       if (offer.length > 0) {
         this.state.lab.offer = offer.slice(0, 3)
+        this.state.lab.offerAt = Date.now()
         this.setNotice(`✨ 第 ${b.floor} 层告破，三选一祝福降临！`)
       }
     }
@@ -726,7 +796,20 @@ class GameStore {
     if (!this.state.lab.offer?.includes(id)) return
     this.state.lab.blessings.push(id)
     this.state.lab.offer = null
+    this.state.lab.offerAt = 0
     this.emit()
+  }
+
+  /** 祝福超时自动选择：从待选项里随机取一个，清空 offer 让爬塔继续 */
+  private autoResolveOffer() {
+    const offer = this.state.lab.offer
+    this.state.lab.offer = null
+    this.state.lab.offerAt = 0
+    if (!offer || offer.length === 0) return
+    const pick = offer[Math.floor(Math.random() * offer.length)]
+    this.state.lab.blessings.push(pick)
+    const def = LAB_BLESSINGS.find(b => b.id === pick)
+    this.setNotice(`⏳ 祝福选择超时，自动选了「${def?.name ?? pick}」`)
   }
 
   buyLabShop(item: 'pill' | 'essence', grade?: number) {
@@ -897,6 +980,65 @@ class GameStore {
     this.setNotice(`炼成 ${pill.icon}${pill.name} ×1`)
     this.emit()
   }
+
+  // ── 商城：限时增益倍率 + 价格随购买递增（跨天回落）+ 购买 ──────────────────────
+  /** 当前生效的某类增益倍率（1 + Σpct/100），已过期的不计入 */
+  private buffMult(kind: BuffKind): number {
+    const now = Date.now()
+    let pct = 0
+    for (const b of this.state.buffs) {
+      if (b.expireAt <= now) continue
+      const def = SHOP_BUFFS.find(x => x.id === b.id)
+      if (def && def.kind === kind) pct += def.pct
+    }
+    return 1 + pct / 100
+  }
+
+  /** 跨天则清空当日购买计数，价格回落到基准（纯价格限制，不设次数上限） */
+  private ensureShopDay() {
+    const today = new Date().toDateString()
+    if (this.state.shop.date !== today) this.state.shop = { date: today, counts: {} }
+  }
+
+  /** 商品当前价格 = costMult × 生涯关卡奖励 × growth^当日已购次数 */
+  shopPrice(goodId: string): number {
+    this.ensureShopDay()
+    const g = SHOP_GOODS.find(x => x.id === goodId)
+    if (!g) return Infinity
+    const base = g.costMult * stageCoinReward(this.state.highestStage)
+    const count = this.state.shop.counts[goodId] ?? 0
+    return Math.round(base * Math.pow(g.growth, count))
+  }
+
+  buyShopItem(goodId: string) {
+    const g = SHOP_GOODS.find(x => x.id === goodId)
+    if (!g) return
+    const price = this.shopPrice(goodId)
+    if ((this.state.inventory.coin ?? 0) < price) { this.setNotice('灵金不足'); return }
+    this.state.inventory.coin -= price
+    this.state.shop.counts[goodId] = (this.state.shop.counts[goodId] ?? 0) + 1
+    if (g.kind === 'material' && g.item) {
+      this.state.inventory[g.item] = (this.state.inventory[g.item] ?? 0) + (g.amount ?? 1)
+      this.setNotice(`购得 ${itemLabel(g.item).icon}${itemLabel(g.item).name} ×${g.amount ?? 1}`)
+    } else if (g.kind === 'buff' && g.buffId) {
+      const def = SHOP_BUFFS.find(x => x.id === g.buffId)
+      if (def) {
+        const now = Date.now()
+        const existing = this.state.buffs.find(b => b.id === def.id)
+        const from = existing ? Math.max(now, existing.expireAt) : now // 重复购买则续时
+        const expireAt = from + def.minutes * 60000
+        if (existing) existing.expireAt = expireAt
+        else this.state.buffs.push({ id: def.id, expireAt })
+        this.setNotice(`${def.icon} ${def.name} 生效 ${def.minutes} 分钟`)
+      }
+    } else if (g.kind === 'equip') {
+      const slot = EQUIP_SLOTS[Math.floor(Math.random() * EQUIP_SLOTS.length)]
+      const item = rollEquip(slot, rollEquipQuality())
+      this.state.equipBag.push(item)
+      this.setNotice(`🎁 购得装备：${item.name}`)
+    }
+    this.emit()
+  }
 }
 
 export const game = new GameStore()
@@ -967,7 +1109,7 @@ export function pillCraftCost(grade: number): { herb: number; coin: number } {
 }
 
 // ── 卡关引导：读实际库存/进度算出具体可执行的建议，而不是空泛提示 ──────────────
-export interface Guide { icon: string; text: string; tab: 'roster' | 'alchemy' | 'recruit' }
+export interface Guide { icon: string; text: string; tab: 'roster' | 'shop' | 'recruit' }
 
 export function nextGuides(state: GameState): Guide[] {
   const out: Guide[] = []
@@ -990,7 +1132,7 @@ export function nextGuides(state: GameState): Guide[] {
       const grade = pillGradeFor(entry.level)
       const have = state.inventory[`pill${grade}`] ?? 0
       if (have < 1) {
-        out.push({ icon: '💊', text: `${CHAR_MAP[id]?.name ?? id} 卡在突破口，需要 ${grade} 品丹药，去丹房炼一颗`, tab: 'alchemy' })
+        out.push({ icon: '💊', text: `${CHAR_MAP[id]?.name ?? id} 卡在突破口，需要 ${grade} 品丹药，去商城丹房炼一颗`, tab: 'shop' })
         break
       }
     }
@@ -1012,7 +1154,7 @@ export function nextGuides(state: GameState): Guide[] {
     for (const pill of PILLS) {
       const cost = pillCraftCost(pill.grade)
       if (herb >= cost.herb && coin >= cost.coin && (state.inventory[pill.id] ?? 0) < 1) {
-        out.push({ icon: '🌿', text: `灵药灵金够炼一颗${pill.name}了，去丹房备着`, tab: 'alchemy' })
+        out.push({ icon: '🌿', text: `灵药灵金够炼一颗${pill.name}了，去商城丹房备着`, tab: 'shop' })
         break
       }
     }

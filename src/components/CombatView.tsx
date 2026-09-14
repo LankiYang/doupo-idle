@@ -7,7 +7,7 @@ import { impactFxForRole, impactFxForMonster, healFx } from '../game/fx'
 import { useCombatSound } from '../game/sound'
 import { MAPS, stageStats, isBossStage, zoneForStage, monsterForStage, ROLE_COLOR, ATK_STYLE_COLOR, type AtkStyle } from '../game/data'
 
-type Tab = 'roster' | 'combat' | 'recruit' | 'alchemy'
+type Tab = 'roster' | 'combat' | 'recruit' | 'shop'
 
 // 演出时间窗（ms）：事件 time 已到且在窗口内才播放对应动画
 const HIT_MS = 380

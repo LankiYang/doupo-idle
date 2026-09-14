@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useGame, game, charLabel, charStats, rarityInfo, itemLabel, fmtNum, type CombatEvent, type GameState } from '../game/engine'
+import { useGame, game, charLabel, charStats, rarityInfo, itemLabel, fmtNum, LAB_OFFER_TIMEOUT, type CombatEvent, type GameState } from '../game/engine'
 import { portraitFor } from '../game/portraits'
 import { monsterSpriteFor } from '../game/monsters'
 import { sceneFor } from '../game/scenes'
@@ -184,7 +184,13 @@ export default function LabView() {
 
         {lab.offer && (
           <div className="mb-4 rounded-md border border-dq-fire bg-black/60 p-3">
-            <div className="mb-2 text-center text-sm text-dq-fire">✨ 三选一祝福 ✨</div>
+            <div className="mb-2 text-center text-sm text-dq-fire">✨ 三选一祝福 ✨
+              {lab.offerAt > 0 && (
+                <span className="ml-2 text-xs text-[#a89478]">
+                  {Math.max(0, Math.ceil((LAB_OFFER_TIMEOUT - (now - lab.offerAt)) / 1000))}s 后自动选择
+                </span>
+              )}
+            </div>
             <div className="grid grid-cols-3 gap-2">
               {lab.offer.map(id => {
                 const b = LAB_BLESSINGS.find(x => x.id === id)!
