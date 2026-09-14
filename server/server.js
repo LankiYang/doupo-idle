@@ -53,7 +53,7 @@ function rankOf(playerId) {
   const i = list.findIndex(e => e.playerId === playerId)
   return { rank: i < 0 ? null : i + 1, total: list.length, entry: i < 0 ? null : list[i] }
 }
-function publicRow(e, rank) { return { rank, name: e.name, power: e.power, stage: e.stage, updatedAt: e.updatedAt } }
+function publicRow(e, rank) { return { rank, name: e.name, power: e.power, stage: e.stage, floor: e.floor ?? 0, updatedAt: e.updatedAt } }
 function send(res, code, obj) {
   const body = JSON.stringify(obj)
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store' })
@@ -137,12 +137,13 @@ const server = http.createServer(async (req, res) => {
       const power = num(body.power, POWER_CAP)
       if (power === null) return send(res, 400, { error: 'invalid power' })
       const stage = body.stage === undefined ? 0 : (num(body.stage, STAGE_CAP) ?? 0)
+      const floor = body.floor === undefined ? 0 : (num(body.floor, STAGE_CAP) ?? 0)
       const now = Date.now()
       const last = lastSubmit.get(pid) || 0
       if (now - last < SUBMIT_COOLDOWN) return send(res, 429, { error: 'cooldown' })
       lastSubmit.set(pid, now)
       const name = cleanName(body.name)
-      entries.set(pid, { playerId: pid, name, power, stage, updatedAt: now })
+      entries.set(pid, { playerId: pid, name, power, stage, floor, updatedAt: now })
       schedulePersist()
       const r = rankOf(pid)
       return send(res, 200, { rank: r.rank, total: r.total })

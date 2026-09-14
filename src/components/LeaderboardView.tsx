@@ -23,11 +23,12 @@ export default function LeaderboardView() {
 
   const power = combatPower(state)
   const stage = state.highestStage
+  const floor = state.lab.highestFloor
 
   // 上传当前真实战绩并拉取全服榜单（提交失败/冷却不影响拉取）
   async function refresh(doSubmit: boolean) {
     setStatus('loading')
-    if (doSubmit) await submitScore(nickname.trim() || '无名侠客', power, stage)
+    if (doSubmit) await submitScore(nickname.trim() || '无名侠客', power, stage, floor)
     const [board, me] = await Promise.all([fetchLeaderboard(100), fetchMe()])
     if (!board) { setStatus('error'); return }
     setRows(board.entries)
@@ -43,7 +44,7 @@ export default function LeaderboardView() {
     setNickname(trimmed)
     saveNickname(trimmed)
     setEditing(false)
-    submitScore(trimmed, power, stage).then(() => refresh(false))
+    submitScore(trimmed, power, stage, floor).then(() => refresh(false))
   }
 
   return (
@@ -106,7 +107,7 @@ export default function LeaderboardView() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className={`truncate ${me ? 'text-dq-gold' : 'text-[#e8dcc8]'}`}>{r.name}{me && '（我）'}</div>
-                    <div className="text-[10px] text-[#5a4a38]">第 {r.stage} 关 · {agoText(r.updatedAt)}</div>
+                    <div className="text-[10px] text-[#5a4a38]">主线第 {r.stage} 关 · 天梯 {r.floor} 层 · {agoText(r.updatedAt)}</div>
                   </div>
                   <div className="tabular-nums text-[#a89478]">{fmtNum(r.power)}</div>
                 </div>

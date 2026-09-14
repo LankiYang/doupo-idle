@@ -25,18 +25,18 @@ export function getPlayerId(): string {
   }
 }
 
-export interface LbRow { rank: number; name: string; power: number; stage: number; updatedAt: number }
+export interface LbRow { rank: number; name: string; power: number; stage: number; floor: number; updatedAt: number }
 export interface LbResp { entries: LbRow[]; total: number }
 export interface MeResp { entry: LbRow | null; rank: number | null; total: number }
 export interface SubmitResp { rank: number | null; total: number }
 
 /** 上传当前战绩；冷却中(429)或网络错误返回 null，调用方静默忽略 */
-export async function submitScore(name: string, power: number, stage: number): Promise<SubmitResp | null> {
+export async function submitScore(name: string, power: number, stage: number, floor = 0): Promise<SubmitResp | null> {
   try {
     const r = await fetch(`${API}/score`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ playerId: getPlayerId(), name, power: Math.floor(power), stage: Math.floor(stage) }),
+      body: JSON.stringify({ playerId: getPlayerId(), name, power: Math.floor(power), stage: Math.floor(stage), floor: Math.floor(floor) }),
     })
     if (!r.ok) return null
     return (await r.json()) as SubmitResp
