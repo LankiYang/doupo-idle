@@ -6,9 +6,9 @@ import {
   stageStats, isBossStage, zoneForStage, monsterForStage, stageCoinReward,
   labStats, isLabBoss, labDaolingReward,
   MAX_STARS, starUpCost, SHENG_SHARD_COST,
-  rollEquip, rollEquipQuality, equipAffixSum,
+  rollEquip, rollEquipQuality, equipAffixSum, EQUIP_BREAKDOWN,
   SHOP_BUFFS, SHOP_GOODS,
-  type CharacterDef, type Rarity, type EquipSlot, type EquipItem, type BuffKind,
+  type CharacterDef, type Rarity, type EquipSlot, type EquipItem, type EquipAffix, type BuffKind,
 } from './data'
 import { playSound } from './sound'
 
@@ -116,7 +116,13 @@ function freshState(): GameState {
   }
 }
 
-export function charStats(entry: RosterEntry, charDef: CharacterDef, fireId: string | null) {
+/**
+ * 角色属性的**未取整**版本。战斗/UI 用的是取整后的 charStats，
+ * 但战力评分必须走这里：1 级角色攻击只有十几点，装备词条 2% 与 9% 的差别
+ * 在 Math.round 之后会一起归零，导致"换上这件能不能涨"全部判成 0——
+ * 一键穿戴会认不出更好的装备、一键分解会把更好的装备当垃圾清掉。
+ */
+function charStatsRaw(entry: RosterEntry, charDef: CharacterDef, fireId: string | null) {
   const lv = entry.level
   // 星级线性加成 × 境界乘法加成（后者是对抗怪物指数成长的关键，见 data.ts REALM_POWER）
   const starMult = 1 + entry.stars * 0.08
@@ -147,7 +153,57 @@ export function charStats(entry: RosterEntry, charDef: CharacterDef, fireId: str
   atk *= 1 + equipAtkPct / 100
   def *= 1 + equipDefPct / 100
   hp *= 1 + equipHpPct / 100
-  return { atk: Math.round(atk), def: Math.round(def), hp: Math.round(hp), critRate: Math.min(100, critRate), critDmg }
+  return { atk, def, hp, critRate: Math.min(100, critRate), critDmg }
+}
+
+export function charStats(entry: RosterEntry, charDef: CharacterDef, fireId: string | null) {
+  const s = charStatsRaw(entry, charDef, fireId)
+  return { atk: Math.round(s.atk), def: Math.round(s.def), hp: Math.round(s.hp), critRate: s.critRate, critDmg: s.critDmg }
+}
+
+/**
+ * 单个角色的战力（与 combatPower 同一套权重，方便"换上这件能涨多少"直接相减）。
+ * 暴击折进有效攻击——暴击率/暴击伤害只从装备产出，所以这套评分天然奖励带暴击词条的装备，
+ * 不会因为品阶低就一律判死（低阶高暴击词条的戒指仍可能胜出）。
+ * 走 charStatsRaw：取整后的属性会让低级角色的装备差距归零，见那里的注释。
+ */
+export function charPower(entry: RosterEntry, cdef: CharacterDef, fireId: string | null): number {
+  const s = charStatsRaw(entry, cdef, fireId)
+  const effAtk = s.atk * (1 + (s.critRate / 100) * (s.critDmg / 100))
+  return effAtk + s.def * 2 + s.hp * 0.15
+}
+
+/**
+ * 单件装备的校验/修复：旧版本存档、被手工改坏的存档里可能出现缺 innate / extra 为 null /
+ * 槽位或品阶非法的条目。这类条目一旦进内存，就会在 charStats（渲染路径）里抛错导致白屏，
+ * 或者让「一键最优穿戴」把装备塞进不存在的槽位（装备凭空消失）。修不了就丢弃该件。
+ */
+function sanitizeEquipItem(raw: unknown): EquipItem | null {
+  if (!raw || typeof raw !== 'object') return null
+  const it = raw as Partial<EquipItem>
+  if (typeof it.id !== 'string' || !it.id) return null
+  if (!EQUIP_SLOTS.includes(it.slot as EquipSlot)) return null
+  if (!it.quality || !(it.quality in EQUIP_BREAKDOWN)) return null
+  const innate = it.innate
+  if (!innate || typeof innate !== 'object' || typeof innate.type !== 'string' || !Number.isFinite(innate.value as number)) return null
+  const extra = Array.isArray(it.extra)
+    ? it.extra.filter(a => a && typeof a === 'object' && typeof a.type === 'string' && Number.isFinite(a.value as number))
+    : []
+  return {
+    id: it.id, slot: it.slot as EquipSlot, quality: it.quality as Rarity,
+    name: typeof it.name === 'string' ? it.name : '装备',
+    innate: innate as EquipAffix, extra: extra as EquipAffix[],
+  }
+}
+
+function sanitizeEquipMap(raw: unknown): Partial<Record<EquipSlot, EquipItem>> {
+  const out: Partial<Record<EquipSlot, EquipItem>> = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const slot of EQUIP_SLOTS) {
+    const item = sanitizeEquipItem((raw as Record<string, unknown>)[slot])
+    if (item && item.slot === slot) out[slot] = item
+  }
+  return out
 }
 
 class GameStore {
@@ -195,7 +251,7 @@ class GameStore {
         level: Number.isFinite(e.level as number) ? (e.level as number) : 1,
         xp: Number.isFinite(e.xp as number) ? (e.xp as number) : 0,
         stars: Number.isFinite(e.stars as number) ? (e.stars as number) : 0,
-        equip: (e.equip && typeof e.equip === 'object') ? e.equip : {},
+        equip: sanitizeEquipMap(e.equip),
       }
     }
     // 空名册会导致无法出战的软锁，兜底塞回一个初始角色
@@ -220,7 +276,7 @@ class GameStore {
       lastProgressAt: Number.isFinite(parsed.lastProgressAt as number) ? (parsed.lastProgressAt as number) : Date.now(),
       lab: { ...base.lab, ...(parsed.lab ?? {}), battle: null },
       combatEvents: [],
-      equipBag: Array.isArray(parsed.equipBag) ? parsed.equipBag : [],
+      equipBag: Array.isArray(parsed.equipBag) ? parsed.equipBag.map(sanitizeEquipItem).filter((x): x is EquipItem => !!x) : [],
       buffs: Array.isArray(parsed.buffs) ? parsed.buffs.filter(b => b && typeof b.expireAt === 'number' && b.expireAt > Date.now()) : [],
       shop: (parsed.shop && typeof parsed.shop.counts === 'object' && parsed.shop.counts)
         ? { date: parsed.shop.date, counts: parsed.shop.counts }
@@ -963,6 +1019,354 @@ class GameStore {
     this.emit()
   }
 
+  // ── 装备评分与自动穿戴 ────────────────────────────────────────────────────
+  private teamIds(): string[] {
+    return [...this.state.team.front, ...this.state.team.back].filter((x): x is string => !!x)
+  }
+
+  /** 异火只对上阵首位生效，口径与 charStats/combatPower 一致 */
+  private fireIdFor(charId: string): string | null {
+    return this.state.equippedFire && charId === this.state.team.front[0] ? this.state.equippedFire : null
+  }
+
+  powerOf(charId: string): number {
+    const entry = this.state.roster[charId]
+    const cdef = CHAR_MAP[charId]
+    if (!entry || !cdef) return 0
+    return charPower(entry, cdef, this.fireIdFor(charId))
+  }
+
+  /** 把 item 装到该角色对应槽位后它的战力（只试算，不改状态） */
+  powerIfEquipped(charId: string, item: EquipItem): number {
+    const entry = this.state.roster[charId]
+    const cdef = CHAR_MAP[charId]
+    if (!entry || !cdef) return 0
+    const prev = entry.equip[item.slot]
+    entry.equip[item.slot] = item
+    const p = charPower(entry, cdef, this.fireIdFor(charId))
+    if (prev) entry.equip[item.slot] = prev; else delete entry.equip[item.slot]
+    return p
+  }
+
+  /** 该装备对某角色的战力增益（≤0 表示不如他现在穿的） */
+  equipGain(charId: string, item: EquipItem): number {
+    return this.powerIfEquipped(charId, item) - this.powerOf(charId)
+  }
+
+  /**
+   * 找一对「同槽位、不同角色」的位置做交换，返回战力增益最大的一组（无正增益则返回 null）。
+   *
+   * 为什么需要它：单件贪心只保证「不存在任何单件移动能再涨战力」——那是**局部最优，不是全局最优**。
+   * 跨角色抢同一件装备时会出现先后耦合（好装备先给了甲，乙就只剩次好的，而反过来总战力更高），
+   * 单件贪心会被卡在这种次优解上。模糊测试实测：200 轮随机实例里补 2-opt 后仍有 13 轮低于暴力枚举最优。
+   * 补一轮同槽位成对交换（2-opt）能消掉绝大多数这种耦合，剩下的是需要三件以上轮换才解开的，代价 <1%。
+   * 交换只在同槽位之间进行，所以不需要额外校验槽位兼容性。
+   */
+  private bestSwap(ids: string[]): { gain: number; a: string; b: string; slot: EquipSlot } | null {
+    let bestGain = 1e-9
+    let best: { gain: number; a: string; b: string; slot: EquipSlot } | null = null
+    for (const slot of EQUIP_SLOTS) {
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const A = this.state.roster[ids[i]]
+          const B = this.state.roster[ids[j]]
+          if (!A || !B) continue
+          const ea = A.equip[slot]
+          const eb = B.equip[slot]
+          if (!ea && !eb) continue // 两边都空，交换没有意义
+          const before = this.powerOf(ids[i]) + this.powerOf(ids[j])
+          if (eb) A.equip[slot] = eb; else delete A.equip[slot]
+          if (ea) B.equip[slot] = ea; else delete B.equip[slot]
+          const after = this.powerOf(ids[i]) + this.powerOf(ids[j])
+          if (ea) A.equip[slot] = ea; else delete A.equip[slot]
+          if (eb) B.equip[slot] = eb; else delete B.equip[slot]
+          if (after - before > bestGain) { bestGain = after - before; best = { gain: after - before, a: ids[i], b: ids[j], slot } }
+        }
+      }
+    }
+    return best
+  }
+
+  /**
+   * 单槽位精确重分配：固定其余三个槽位，把该槽位的候选装备（池子里的 + 上阵角色正穿着的）
+   * 在上阵角色之间重新指派，用状压 DP 求**这一个槽位**的最优解（每人至多一件，允许装备留在池子里）。
+   *
+   * 为什么需要它：单件贪心只保证"没有任何单件移动能再涨"，同槽位两两交换（2-opt）只保证
+   * "没有一对能换得更划算"——**三件以上轮换**这两种都解不开。模糊测试里与全局最优的差距
+   * 全部出自这种同槽位循环（最坏 0.8%）。
+   *
+   * 规模是 候选数 × 2^上阵人数，所以只在小规模下启用（见 COST）：大团队 + 大背包候选极多、
+   * 同槽位耦合本来就少，2-opt 已经够，没必要为一个动不了的槽位花几十毫秒。
+   * 只在 DP 最优严格优于现状时才落地（单调、可重复点击幂等）。
+   */
+  private slotReassign(ids: string[], pool: EquipItem[]): boolean {
+    const n = ids.length
+    const full = 1 << n
+    const COST = 20000 // 候选数 × 2^n 的上限（约几毫秒的量级）
+    const NEG = -Infinity
+    let anyChanged = false
+    for (const slot of EQUIP_SLOTS) {
+      const cands = pool.filter(it => it.slot === slot)
+      for (const id of ids) {
+        const it = this.state.roster[id]?.equip[slot]
+        if (it) cands.push(it)
+      }
+      if (cands.length < 2 || cands.length * full > COST) continue
+
+      // empty[c]：第 c 人该槽位空着时的战力（其它槽位固定）；delta[i][c]：把第 i 件给他能涨多少
+      const empty: number[] = []
+      for (const id of ids) {
+        const entry = this.state.roster[id]
+        const cdef = CHAR_MAP[id]
+        if (!entry || !cdef) { empty.push(NEG); continue }
+        const prev = entry.equip[slot]
+        delete entry.equip[slot]
+        empty.push(charPower(entry, cdef, this.fireIdFor(id)))
+        if (prev) entry.equip[slot] = prev
+      }
+      const delta = cands.map(it => ids.map((id, c) => {
+        const entry = this.state.roster[id]
+        const cdef = CHAR_MAP[id]
+        if (!entry || !cdef || empty[c] === NEG) return NEG
+        const prev = entry.equip[slot]
+        entry.equip[slot] = it
+        const d = charPower(entry, cdef, this.fireIdFor(id)) - empty[c]
+        if (prev) entry.equip[slot] = prev; else delete entry.equip[slot]
+        return d
+      }))
+
+      // 现状的增益和：用于判断这次重指派有没有真的变强（没变强就不动，避免无谓重排）
+      const holder = new Map<string, number>()
+      for (let c = 0; c < n; c++) {
+        const it = this.state.roster[ids[c]]?.equip[slot]
+        if (it) holder.set(it.id, c)
+      }
+      let curVal = 0
+      for (let i = 0; i < cands.length; i++) {
+        const c = holder.get(cands[i].id)
+        if (c !== undefined) curVal += delta[i][c]
+      }
+
+      // 状压 DP：dp[mask] = 已把这些候选分配给 mask 中这些人的最大增益和（每个人至多一件）
+      let dp: number[] = new Array(full).fill(NEG)
+      dp[0] = 0
+      const back: Int8Array[] = []
+      for (let i = 0; i < cands.length; i++) {
+        const nxt = dp.slice()
+        const bk = new Int8Array(full).fill(-1)
+        for (let mask = 0; mask < full; mask++) {
+          const base = dp[mask]
+          if (base === NEG) continue
+          for (let c = 0; c < n; c++) {
+            if (mask & (1 << c)) continue
+            const d = delta[i][c]
+            if (d === NEG) continue
+            const nm = mask | (1 << c)
+            if (base + d > nxt[nm]) { nxt[nm] = base + d; bk[nm] = c }
+          }
+        }
+        dp = nxt
+        back.push(bk)
+      }
+      let bestMask = 0
+      for (let mask = 1; mask < full; mask++) if (dp[mask] > dp[bestMask]) bestMask = mask
+      if (dp[bestMask] <= curVal + 1e-9) continue
+
+      const assign = new Map<string, number>()
+      let mask = bestMask
+      for (let i = cands.length - 1; i >= 0; i--) {
+        const c = back[i][mask]
+        if (c < 0) continue
+        assign.set(cands[i].id, c)
+        mask &= ~(1 << c)
+      }
+      // 落地：先把"没被指派回原位"的旧装备摘回池子，再把选中的装上（从池子里取）
+      for (let c = 0; c < n; c++) {
+        const entry = this.state.roster[ids[c]]
+        const it = entry?.equip[slot]
+        if (it && assign.get(it.id) !== c) { delete entry.equip[slot]; pool.push(it) }
+      }
+      for (const [itemId, c] of assign) {
+        const entry = this.state.roster[ids[c]]
+        if (entry.equip[slot]?.id === itemId) continue
+        const k = pool.findIndex(it => it.id === itemId)
+        if (k < 0) continue
+        entry.equip[slot] = pool.splice(k, 1)[0]
+      }
+      anyChanged = true
+    }
+    return anyChanged
+  }
+
+  /**
+   * 一键最优穿戴：候选池 = 背包 + 上阵角色身上已穿的装备（全部脱下后统一重新分配）。
+   * 三段式搜索，每段都只做"能涨战力"的改动，直到全部无改进：
+   *   ① 逐件贪心（每轮装全局增益最大的一件）
+   *   ② 同槽位两两交换（2-opt）——解开"好装备先给了甲、乙只剩次好的"这类两两耦合
+   *   ③ 单槽位精确重分配（状压 DP）——解开 ①② 都解不开的"三件以上同槽位轮换"
+   * 只作用于上阵角色，非上阵角色身上的装备原样不动。
+   *
+   * **口径必须统一**：搜索的目标函数、以及最后"这次重排要不要保留"的判据，用的都是
+   * `powerOf` 的**未取整**战力。不能拿显示用的 `combatPower`（内部 Math.round）当判据——
+   * 低级角色全队战力才几十点，几件装备合起来涨 0.8 也会被取整抹平，于是算法认定"没变强"
+   * 而回滚，玩家点「一键穿戴」会看到装备全留在背包里、提示"已是最优"（实测 lv1 小背包复现）。
+   * 代价是显示战力偶尔不动——UI 那边对不到 1 点的变化显示"≈ 持平"，见 EquipmentView。
+   *
+   * 仍是**近似最优**：②③ 只覆盖同一槽位内的重排，跨槽位的联合调整没做（那是通用指派问题），
+   * 所以理论上可能不是全局最优。2026-09-14 的 200 轮随机小实例模糊测试（3 人以内、与暴力枚举
+   * 对比）在补上 ③ 之后为 200/200 一致，见 design/数值设计.md。
+   */
+  autoEquipBest(): { changed: number; powerGain: number } {
+    const ids = this.teamIds()
+    if (!ids.length) return { changed: 0, powerGain: 0 }
+    const rawPower = () => ids.reduce((s, id) => s + this.powerOf(id), 0)
+    const before = rawPower()
+
+    // 位置快照：itemId → 'bag' 或 `${charId}:${slot}`。
+    // 用处一：算完发现没比原来强，就原样还原——否则每次点击都会重排成另一组等价解
+    //        （战力一样，玩家看到装备全换了一遍还以为亏了）。
+    // 用处二：changed 统计成"真正换了位置的件数"，而不是"从裸装装了N件"。
+    const snapEquip = new Map<string, Partial<Record<EquipSlot, EquipItem>>>()
+    const snapBag = [...this.state.equipBag]
+    const where = new Map<string, string>()
+    for (const it of snapBag) where.set(it.id, 'bag')
+    for (const id of ids) {
+      const entry = this.state.roster[id]
+      const copy: Partial<Record<EquipSlot, EquipItem>> = {}
+      for (const slot of EQUIP_SLOTS) {
+        const it = entry?.equip[slot]
+        if (!it) continue
+        copy[slot] = it
+        where.set(it.id, `${id}:${slot}`)
+      }
+      snapEquip.set(id, copy)
+    }
+
+    const pool: EquipItem[] = [...this.state.equipBag]
+    for (const id of ids) {
+      const entry = this.state.roster[id]
+      if (!entry) continue
+      for (const slot of EQUIP_SLOTS) {
+        const it = entry.equip[slot]
+        if (it) { pool.push(it); delete entry.equip[slot] }
+      }
+    }
+    const cur = new Map(ids.map(id => [id, this.powerOf(id)])) // 此刻全员裸装，这就是基准
+
+    for (let iter = 0, maxIter = ids.length * EQUIP_SLOTS.length * 4; iter < maxIter; iter++) {
+      let bestGain = 1e-9, bestChar = '', bestIdx = -1, bestPrev: EquipItem | null = null
+      for (const id of ids) {
+        const entry = this.state.roster[id]
+        const cdef = CHAR_MAP[id]
+        if (!entry || !cdef) continue
+        const fireId = this.fireIdFor(id)
+        const curPower = cur.get(id) ?? 0
+        for (let i = 0; i < pool.length; i++) {
+          const item = pool[i]
+          const prev = entry.equip[item.slot] ?? null
+          entry.equip[item.slot] = item
+          const gain = charPower(entry, cdef, fireId) - curPower
+          if (prev) entry.equip[item.slot] = prev; else delete entry.equip[item.slot]
+          if (gain > bestGain) { bestGain = gain; bestChar = id; bestIdx = i; bestPrev = prev }
+        }
+      }
+      if (bestIdx >= 0) {
+        const item = pool[bestIdx]
+        pool.splice(bestIdx, 1)
+        if (bestPrev) pool.push(bestPrev) // 被顶替下来的回到池子，还有机会给别人
+        this.state.roster[bestChar].equip[item.slot] = item
+        cur.set(bestChar, this.powerOf(bestChar))
+        continue
+      }
+      // 单件移动已无增益 → 先试一对同槽位交换（便宜），再试单槽位精确重分配（贵，但能解开三人以上轮换）
+      const sw = this.bestSwap(ids)
+      if (sw) {
+        const A = this.state.roster[sw.a]
+        const B = this.state.roster[sw.b]
+        const ea = A.equip[sw.slot]
+        const eb = B.equip[sw.slot]
+        if (eb) A.equip[sw.slot] = eb; else delete A.equip[sw.slot]
+        if (ea) B.equip[sw.slot] = ea; else delete B.equip[sw.slot]
+        cur.set(sw.a, this.powerOf(sw.a))
+        cur.set(sw.b, this.powerOf(sw.b))
+        continue
+      }
+      if (!this.slotReassign(ids, pool)) break
+      // 整个槽位被重新指派过，缓存全部作废，重算一遍（每轮至多 上阵人数 次 powerOf）
+      for (const id of ids) cur.set(id, this.powerOf(id))
+    }
+
+    this.state.equipBag = pool
+    const after = rawPower()
+    if (after <= before + 1e-9) {
+      // 已经是最优（或等价解）：还原，不做无意义的重排
+      this.state.equipBag = snapBag
+      for (const id of ids) this.state.roster[id].equip = { ...snapEquip.get(id) }
+      return { changed: 0, powerGain: 0 }
+    }
+
+    let changed = 0
+    for (const it of this.state.equipBag) if (where.get(it.id) !== 'bag') changed++
+    for (const id of ids) {
+      for (const slot of EQUIP_SLOTS) {
+        const it = this.state.roster[id].equip[slot]
+        if (it && where.get(it.id) !== `${id}:${slot}`) changed++
+      }
+    }
+    this.emit()
+    return { changed, powerGain: after - before }
+  }
+
+  // ── 装备分解：把堆积的低阶装备换成升星材料 ────────────────────────────────
+  /** 分解一件背包装备，产出武魂精血（天阶以上额外给玄晶） */
+  breakdownEquip(itemId: string): { essence: number; xuanjing: number } | null {
+    const idx = this.state.equipBag.findIndex(i => i.id === itemId)
+    if (idx < 0) return null
+    const item = this.state.equipBag[idx]
+    const gain = EQUIP_BREAKDOWN[item.quality]
+    if (!gain) return null // 品阶无法识别的装备宁可留着也不销毁（理论上进不来，见 sanitizeEquipItem）
+    this.state.equipBag.splice(idx, 1)
+    this.state.inventory.essence = (this.state.inventory.essence ?? 0) + gain.essence
+    if (gain.xuanjing) this.state.inventory.xuanjing = (this.state.inventory.xuanjing ?? 0) + gain.xuanjing
+    this.emit()
+    return gain
+  }
+
+  /**
+   * 垃圾装备 = 所有上阵角色装上都不会变强的背包装备。
+   * 只要还有上阵角色该槽位空着、或有人能靠它涨战力，就不算垃圾
+   * （避免把有用的备用件、或带暴击词条能翻盘的低阶装备误分解）。
+   */
+  isJunkEquip(item: EquipItem): boolean {
+    const ids = this.teamIds()
+    if (!ids.length) return false
+    for (const id of ids) {
+      const entry = this.state.roster[id]
+      if (!entry) continue
+      if (!entry.equip[item.slot]) return false
+      if (this.equipGain(id, item) > 0) return false
+    }
+    return true
+  }
+
+  /** 一键分解所有垃圾装备 */
+  breakdownJunk(): { count: number; essence: number; xuanjing: number } {
+    let count = 0, essence = 0, xuanjing = 0
+    const keep: EquipItem[] = []
+    for (const item of this.state.equipBag) {
+      const g = EQUIP_BREAKDOWN[item.quality]
+      if (!g) { keep.push(item); continue } // 品阶无法识别 → 留着
+      if (!this.isJunkEquip(item)) { keep.push(item); continue }
+      count++; essence += g.essence; xuanjing += g.xuanjing
+    }
+    if (!count) return { count: 0, essence: 0, xuanjing: 0 }
+    this.state.equipBag = keep
+    this.state.inventory.essence = (this.state.inventory.essence ?? 0) + essence
+    if (xuanjing) this.state.inventory.xuanjing = (this.state.inventory.xuanjing ?? 0) + xuanjing
+    this.emit()
+    return { count, essence, xuanjing }
+  }
+
   // ── 炼丹（灵药+灵金 → 指定品阶丹药，缓解突破材料瓶颈）───────────────────────
   craftPill(grade: number) {
     const pill = PILLS.find(p => p.grade === grade)
@@ -1076,9 +1480,7 @@ export function combatPower(state: GameState): number {
     const entry = state.roster[id]
     if (!cdef || !entry) continue
     const fireId = state.equippedFire && id === state.team.front[0] ? state.equippedFire : null
-    const stats = charStats(entry, cdef, fireId)
-    const effAtk = stats.atk * (1 + (stats.critRate / 100) * (stats.critDmg / 100))
-    total += effAtk * 1 + stats.def * 2 + stats.hp * 0.15
+    total += charPower(entry, cdef, fireId)
   }
   return Math.round(total)
 }

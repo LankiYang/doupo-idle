@@ -519,11 +519,33 @@ export function rollEquipQuality(): Rarity {
   return 'yellow'
 }
 
-/** 汇总一件装备全部词条到某个类型的加成总和（百分比数值，未除以 100） */
+/**
+ * 汇总一件装备全部词条到某个类型的加成总和（百分比数值，未除以 100）。
+ * 对畸形装备要能兜住：旧版本存档 / 手工改坏的存档可能缺 innate 或 extra，
+ * 而 charStats 是渲染路径上的函数，抛一次就是白屏；返回 0 顶多让这件装备暂时没加成。
+ */
 export function equipAffixSum(item: EquipItem, type: AffixType): number {
+  if (!item || !item.innate) return 0
   let sum = item.innate.type === type ? item.innate.value : 0
-  for (const a of item.extra) if (a.type === type) sum += a.value
+  for (const a of item.extra ?? []) if (a && a.type === type) sum += a.value
   return sum
+}
+
+/**
+ * 装备分解产物（给堆积的低阶装备一个出口）。
+ * 产出指向玩家真正会缺的东西：武魂精血（1~5★ 升星）为主，天阶以上额外给玄晶（6~10★ 升星）。
+ * 刻意不产出缘分丹——那是抽卡经济的地基，从"挂机就掉"的高频出口漏出去容易失控。
+ * 量级校准：按掉落权重（黄40/玄30/地16/天9/准圣4/圣1）折合约 7.6 精血/件，
+ * 1200 次击杀期望掉 70 件 ≈ 530 精血，约等于练满 1.8 个角色的 1~5★（单个满 300），
+ * 相对 10~13 名角色的总需求仍是慢速补充，不会让升星失去意义。
+ */
+export const EQUIP_BREAKDOWN: Record<Rarity, { essence: number; xuanjing: number }> = {
+  yellow: { essence: 3, xuanjing: 0 },
+  xuan: { essence: 6, xuanjing: 0 },
+  di: { essence: 10, xuanjing: 0 },
+  tian: { essence: 16, xuanjing: 1 },
+  quasi: { essence: 28, xuanjing: 2 },
+  sheng: { essence: 45, xuanjing: 3 },
 }
 
 // ── 商城：限时增益（花灵金买临时 buff，到期消失，不增加任何存量资源）──────────────
