@@ -461,7 +461,6 @@ class GameStore {
     // 演出节奏：每个出手事件的 time 依次错开 SEQ_MS，UI 只播放 time 已到的事件，形成"依次出手"而非全员同帧
     const t0 = Date.now()
     let seq = 0
-    let totalDmg = 0
     for (const id of this.activeFighters()) {
       const hp = b.fighterHp[id] ?? 0
       if (hp <= 0) continue
@@ -496,18 +495,18 @@ class GameStore {
       let dmg = Math.max(1, Math.round((stats.atk * atkBuff - monster.def * 0.6) * (0.85 + Math.random() * 0.3)))
       const crit = Math.random() * 100 < stats.critRate
       if (crit) dmg = Math.round(dmg * (1 + stats.critDmg / 100))
-      totalDmg += dmg
+      // 逐角色结算：出手即刻扣血并判定，怪物中途倒下则后续角色不再出手
+      b.monsterHp -= dmg
       this.state.combatEvents.push({ type: 'dmg', value: dmg, who: id, time: t0 + seq * SEQ_MS, source: 'main', crit })
       seq++
-    }
-    b.monsterHp -= totalDmg
 
-    if (b.monsterHp <= 0) {
-      this.state.combatEvents.push({ type: 'kill', value: 0, who: monsterDef.name, time: t0 + seq * SEQ_MS, source: 'main', boss: isBossStage(stage) })
-      this.onKill()
-      if (!this.state.battle) return
-      b.monsterHp = stageStats(this.fightStage()).hp
-      return
+      if (b.monsterHp <= 0) {
+        this.state.combatEvents.push({ type: 'kill', value: 0, who: monsterDef.name, time: t0 + seq * SEQ_MS, source: 'main', boss: isBossStage(stage) })
+        this.onKill()
+        if (!this.state.battle) return
+        b.monsterHp = stageStats(this.fightStage()).hp
+        return
+      }
     }
 
     // 怪物反击：优先攻击前排存活者（演出上排在全员出手之后）
@@ -676,7 +675,6 @@ class GameStore {
     // 与主线一致的依次出手演出节奏
     const t0 = Date.now()
     let seq = 0
-    let totalDmg = 0
     for (const id of this.activeFighters()) {
       const hp = b.fighterHp[id] ?? 0
       if (hp <= 0) continue
@@ -709,23 +707,23 @@ class GameStore {
       let dmg = Math.max(1, Math.round((stats.atk - monster.def * 0.6 * (1 - pierce)) * (0.85 + Math.random() * 0.3)))
       const crit = Math.random() * 100 < stats.critRate
       if (crit) dmg = Math.round(dmg * (1 + stats.critDmg / 100))
-      totalDmg += dmg
       if (bt.lifesteal > 0) {
         const fs = this.labFighterStats(id)
         if (fs) b.fighterHp[id] = Math.min(fs.hp, hp + Math.round(dmg * bt.lifesteal / 100))
       }
+      // 逐角色结算：出手即刻扣血并判定，怪物中途倒下则后续角色不再出手
+      b.monsterHp -= dmg
       this.state.combatEvents.push({ type: 'dmg', value: dmg, who: id, time: t0 + seq * SEQ_MS, source: 'lab', crit })
       seq++
-    }
-    b.monsterHp -= totalDmg
 
-    if (b.monsterHp <= 0) {
-      this.state.combatEvents.push({ type: 'kill', value: 0, who: `第${b.floor}层`, time: t0 + seq * SEQ_MS, source: 'lab', boss })
-      this.labOnKill(b, boss)
-      if (!this.state.lab.battle) return
-      b.floor += 1
-      b.monsterHp = labStats(b.floor).hp
-      return
+      if (b.monsterHp <= 0) {
+        this.state.combatEvents.push({ type: 'kill', value: 0, who: `第${b.floor}层`, time: t0 + seq * SEQ_MS, source: 'lab', boss })
+        this.labOnKill(b, boss)
+        if (!this.state.lab.battle) return
+        b.floor += 1
+        b.monsterHp = labStats(b.floor).hp
+        return
+      }
     }
 
     if (bt.dodge > 0 && Math.random() < bt.dodge / 100) return

@@ -25,6 +25,20 @@ export function getPlayerId(): string {
   }
 }
 
+/**
+ * 覆盖当前身份 id。仅在「用存档码恢复云存档」时调用——存档数据与身份必须一起搬，
+ * 否则恢复来的进度会以新生成的 id 继续上传，原 id 的云端档从此停更、榜单记录错位。
+ */
+export function setPlayerId(id: string): boolean {
+  try {
+    if (!id || id.length < 8 || id.length > 64) return false
+    localStorage.setItem(ID_KEY, id)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export interface LbRow { rank: number; name: string; power: number; stage: number; floor: number; updatedAt: number }
 export interface LbResp { entries: LbRow[]; total: number }
 export interface MeResp { entry: LbRow | null; rank: number | null; total: number }

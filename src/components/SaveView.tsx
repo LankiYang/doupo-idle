@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { game } from '../game/engine'
-import { getPlayerId, agoText } from '../game/leaderboardApi'
+import { getPlayerId, setPlayerId, agoText } from '../game/leaderboardApi'
 import { uploadSave, downloadSave, applyCloudSave, getCloudMeta, summarizeSave, type CloudSave } from '../game/saveApi'
 
 type Msg = { kind: 'ok' | 'err' | 'info'; text: string } | null
@@ -15,7 +15,7 @@ export default function SaveView() {
   const [msg, setMsg] = useState<Msg>(null)
   const [busy, setBusy] = useState(false)
   const [lastUpload, setLastUpload] = useState(() => getCloudMeta().lastUpload)
-  const [pending, setPending] = useState<{ save: CloudSave; viaCode: boolean } | null>(null)
+  const [pending, setPending] = useState<{ save: CloudSave; viaCode: boolean; pid: string } | null>(null)
   const [code, setCode] = useState('')
   const [copied, setCopied] = useState(false)
 
@@ -41,12 +41,15 @@ export default function SaveView() {
     const save = await downloadSave(pid)
     setBusy(false)
     if (!save) { setMsg({ kind: 'err', text: viaCode ? '没找到该存档码对应的云存档' : '云端还没有你的存档（先点「立即备份」）' }); return }
-    setPending({ save, viaCode })
+    setPending({ save, viaCode, pid })
   }
 
   function confirmRestore() {
     if (!pending) return
     game.suspendSave() // 先挂起本地保存，避免 reload 时 beforeunload 的 save 用旧内存态覆盖云存档
+    // 身份与存档必须一起搬：用存档码恢复时同步 playerId，
+    // 否则恢复来的进度会挂在新生成的 id 下继续上传，原存档码的云端档从此停更、榜单记录错位
+    if (pending.viaCode) setPlayerId(pending.pid)
     if (!applyCloudSave(pending.save.data)) { setMsg({ kind: 'err', text: '写入本地失败' }); setPending(null); return }
     setPending(null)
     window.location.reload() // 重载后由加固版 load() 校验应用；云端数据若损坏会自动回退 .bak
@@ -118,6 +121,11 @@ export default function SaveView() {
           </div>
           <div className="mt-2 text-xs text-[#a89478]">
             恢复将用云端存档<span className="text-dq-fire">覆盖当前本地进度</span>；当前本地会自动备份，恢复后若反悔可再用「从云端恢复」前的本地备份回退。
+            {pending.viaCode && (
+              <span className="mt-1 block text-dq-gold">
+                本机「存档码」也会同步成这份存档的码，之后进度都备份到该码名下。
+              </span>
+            )}
           </div>
           <div className="mt-3 flex gap-2">
             <button onClick={confirmRestore} className="rounded bg-dq-fire px-3 py-1.5 text-sm text-black">确认恢复</button>
