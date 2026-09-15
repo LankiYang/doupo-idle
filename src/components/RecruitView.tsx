@@ -1,11 +1,34 @@
 import { useState } from 'react'
 import { useGame, game, charLabel, rarityInfo } from '../game/engine'
 import { portraitFor } from '../game/portraits'
-import { CHARACTERS, SHENG_SHARD_COST, type Rarity } from '../game/data'
+import { CHARACTERS, RARITY_INFO, SHENG_SHARD_COST, type Rarity } from '../game/data'
+
+/**
+ * 保底进度条。保底必须看得见——看不见的话玩家只会记得"我又空手了"，
+ * 不会记得"我离保底近了 8 抽"，那这个机制在体验上就等于不存在。
+ */
+function PityBar({ label, cur, max, color }: { label: string; cur: number; max: number; color: string }) {
+  const left = Math.max(0, max - cur)
+  return (
+    <div>
+      <div className="mb-0.5 flex justify-between text-[11px]">
+        <span style={{ color }}>{label}</span>
+        <span className={left === 0 ? 'text-dq-gold' : 'text-[#a89478]'}>
+          {left === 0 ? '下一抽必出' : `还有 ${left} 抽`}
+        </span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded bg-black/40">
+        <div className="h-1.5 rounded transition-[width] duration-300"
+          style={{ width: `${Math.min(100, (cur / max) * 100)}%`, background: color }} />
+      </div>
+    </div>
+  )
+}
 
 export default function RecruitView() {
   const state = useGame()
-  const [results, setResults] = useState<{ id: string; isNew: boolean; rarity: Rarity }[]>([])
+  const [results, setResults] = useState<{ id: string; isNew: boolean; rarity: Rarity; pity: boolean }[]>([])
+  const pity = game.pityState()
 
   const pull = (times: 1 | 10) => {
     const r = game.recruit(times)
@@ -16,7 +39,12 @@ export default function RecruitView() {
     <div className="flex min-h-0 flex-1 flex-col items-center gap-4 overflow-auto p-3 sm:p-6">
       <div className="dq-panel w-full max-w-xl rounded-md p-4 text-center">
         <div className="mb-1 text-dq-gold">结拜天下豪杰</div>
-        <div className="mb-3 text-sm text-[#a89478]">消耗缘分丹招募武魂，距保底地阶 {30 - state.pityCommon} 抽，距保底天阶 {90 - state.pityRare} 抽</div>
+        <div className="mb-3 text-sm text-[#a89478]">消耗缘分丹招募武魂</div>
+        <div className="mb-3 space-y-2 text-left">
+          <PityBar label="天阶保底" cur={pity.tian.cur} max={pity.tian.max} color={RARITY_INFO.tian.color} />
+          <PityBar label="准圣保底" cur={pity.quasi.cur} max={pity.quasi.max} color={RARITY_INFO.quasi.color} />
+          <PityBar label="圣阶保底" cur={pity.sheng.cur} max={pity.sheng.max} color={RARITY_INFO.sheng.color} />
+        </div>
         <div className="flex flex-col justify-center gap-2 sm:flex-row sm:gap-3">
           <button onClick={() => pull(1)} disabled={(state.inventory.yuanfen ?? 0) < 1}
             className="rounded bg-dq-gold px-4 py-2 text-sm text-black disabled:opacity-40">
@@ -48,6 +76,7 @@ export default function RecruitView() {
                 <div className="relative aspect-square">
                   {portrait && <img src={portrait} alt={cdef.name} className="h-full w-full object-cover" />}
                   {r.isNew && <span className="absolute right-0 top-0 rounded-bl bg-green-600 px-1 text-[9px] text-white">新</span>}
+                  {r.pity && <span className="absolute left-0 top-0 rounded-br bg-dq-gold px-1 text-[9px] text-black">保底</span>}
                 </div>
                 <div className="truncate px-0.5" style={{ color: rarity.color }}>{cdef.name.slice(0, 4)}</div>
                 <div className="pb-1 text-[#a89478]">{rarity.label}</div>

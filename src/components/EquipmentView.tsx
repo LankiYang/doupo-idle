@@ -74,7 +74,7 @@ export default function EquipmentView() {
 
   const cdef = charLabel(selectedChar)!
   const entry = state.roster[selectedChar]
-  const fireId = state.equippedFire && selectedChar === state.team.front[0] ? state.equippedFire : null
+  const fireId = game.fireIdOf(selectedChar) // 异火规则收在引擎里，组件别自己拼：口径分叉就会出现「界面显示的」和「战斗用的」不是一回事
   const stats = charStats(entry, cdef, fireId)
   // 基准战力只算一次；背包里每件的"换上能涨多少" = 装上后的战力 − 这个基准
   const basePower = game.powerOf(selectedChar)

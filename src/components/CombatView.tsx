@@ -68,7 +68,7 @@ function FighterCard({ id, state, now, monsterAtkStyle }: { id: string | null; s
   const entry = state.roster[id]
   const portrait = portraitFor(id)
   // 与实际战斗血量口径一致：星级/境界/装备加成都要算进去，否则血条分母跟真实血量对不上
-  const fireId = state.equippedFire && id === state.team.front[0] ? state.equippedFire : null
+  const fireId = game.fireIdOf(id) // 见 engine.fireIdOf：异火生效规则只留一份
   const maxHp = charStats(entry, cdef, fireId).hp
   const hp = state.battle?.fighterHp[id] ?? maxHp
   const alive = hp > 0

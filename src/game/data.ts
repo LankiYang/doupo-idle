@@ -430,6 +430,17 @@ export const STAR_ESSENCE_CAP = 5
 /** 圣阶碎片兑换圣阶角色所需数量（原先碎片有掉落但无任何消耗入口） */
 export const SHENG_SHARD_COST = 30
 
+// ─ 抽卡保底：三层，抽到「该层或更高」即重置该层计数 ──────────────────────
+// 定数依据：缘分丹是抽卡唯一货币，产出只有「主线每 5 关首领首通 1 颗 + 每 25 关额外 2 颗」，
+// 实测线上存档（pityRare 只在触发时归零，所以它直接等于终身抽数）玩家终身只有 26~71 抽。
+// **保底抽数必须小于终身抽数才有意义** —— 原先的「90 抽必出天阶+」全服无人触及，等于没做；
+// 而且它 60% 概率掉天阶，就算攒到也是白攒。三层数字都按「终身 40~70 抽」这个量级定。
+export const PITY_TIAN = 10     // 每 10 抽必出天阶+：消除「十连全白」的挫败
+export const PITY_QUASI = 30    // 每 30 抽必出准圣+：55 关玩家终身 40 颗，坚持抽就一定拿得到
+export const PITY_SHENG = 60    // 每 60 抽必出圣阶：26 名角色里只有 2 个圣阶，保持「玩到后期的里程碑」定位
+/** 天阶保底抽的升格概率：保底也留点惊喜，不是每次都卡着最低档给 */
+export const PITY_TIAN_UPGRADE = 0.1
+
 export function starUpCost(stars: number): { item: 'essence' | 'xuanjing'; amount: number } {
   const next = stars + 1
   if (next <= STAR_ESSENCE_CAP) return { item: 'essence', amount: next * 15 }

@@ -44,8 +44,23 @@ export interface LbResp { entries: LbRow[]; total: number }
 export interface MeResp { entry: LbRow | null; rank: number | null; total: number }
 export interface SubmitResp { rank: number | null; total: number }
 
-/** 上传当前战绩；冷却中(429)或网络错误返回 null，调用方静默忽略 */
+/** 距上次提交的最小间隔(ms)：服务端对同一 playerId 的冷却就是 5s，这里不发比发出去被拒干净 */
+const SUBMIT_MIN_GAP = 6000
+/** 战绩完全没变时，最多多久补传一次(ms) */
+const SUBMIT_SAME_GAP = 60000
+let lastSubmitAt = 0
+let lastPayload = ''
+
+/** 上传当前战绩；本地节流拦下、冷却中、网络错误一律返回 null，调用方静默忽略 */
 export async function submitScore(name: string, power: number, stage: number, floor = 0): Promise<SubmitResp | null> {
+  const payload = JSON.stringify({ name, power: Math.floor(power), stage: Math.floor(stage), floor: Math.floor(floor) })
+  const now = Date.now()
+  // 本地节流：「进榜单页 / 点刷新 / 改昵称」都会提交一次，而服务端 5s 内只认第一次。
+  // 重复请求被拒时浏览器会在控制台打一条红色 429（玩家截图来问"是不是坏了"），所以干脆不发。
+  if (now - lastSubmitAt < SUBMIT_MIN_GAP) return null
+  if (payload === lastPayload && now - lastSubmitAt < SUBMIT_SAME_GAP) return null
+  lastSubmitAt = now
+  lastPayload = payload
   try {
     const r = await fetch(`${API}/score`, {
       method: 'POST',
@@ -53,7 +68,11 @@ export async function submitScore(name: string, power: number, stage: number, fl
       body: JSON.stringify({ playerId: getPlayerId(), name, power: Math.floor(power), stage: Math.floor(stage), floor: Math.floor(floor) }),
     })
     if (!r.ok) return null
-    return (await r.json()) as SubmitResp
+    const j = await r.json()
+    // 服务端冷却回的是 200 + ok:false（不是错误，见 SPEC 坑 14）。这种情况没有名次可报，
+    // 必须返回 null，否则调用方会拿到一个 rank 为 undefined 的"成功响应"（多标签页同开时真会撞上）。
+    if (j?.ok === false) return null
+    return j as SubmitResp
   } catch {
     return null
   }

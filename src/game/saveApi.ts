@@ -51,6 +51,9 @@ export async function uploadSave(force = false): Promise<{ ok: boolean; reason?:
     if (r.status === 429) return { ok: false, reason: 'cooldown' }
     if (!r.ok) return { ok: false, reason: 'http' + r.status }
     const j = await r.json()
+    // 服务端「冷却/拒绝」回的是 200 + ok:false（不再用 429 制造控制台红字）：
+    // 这种必须当失败处理，否则会把 lastHash 写成本次的指纹，后续同一份内容就再也不会重传了
+    if (j?.ok !== true) return { ok: false, reason: j?.reason || 'rejected' }
     writeMeta({ lastUpload: j.updatedAt || Date.now(), lastHash: fp })
     return { ok: true, updatedAt: j.updatedAt }
   } catch { return { ok: false, reason: 'network' } }

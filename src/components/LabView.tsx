@@ -67,7 +67,7 @@ function LabFighterCard({ id, state, now, monsterAtkStyle }: { id: string | null
   const cdef = charLabel(id)!
   const entry = state.roster[id]
   const portrait = portraitFor(id)
-  const fireId = state.equippedFire && id === state.team.front[0] ? state.equippedFire : null
+  const fireId = game.fireIdOf(id) // 见 engine.fireIdOf：异火生效规则只留一份
   const bt = game.blessingTotals()
   const maxHp = Math.max(1, Math.round(charStats(entry, cdef, fireId).hp * (1 + bt.hpPct / 100)))
   const hp = state.lab.battle?.fighterHp[id] ?? maxHp

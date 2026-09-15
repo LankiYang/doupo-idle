@@ -184,11 +184,20 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
-          <Stat label="攻击" value={Math.round(cdef.baseAtk + cdef.atkGrowth * entry.level)} />
-          <Stat label="防御" value={Math.round(cdef.baseDef + cdef.defGrowth * entry.level)} />
-          <Stat label="气血" value={Math.round(cdef.baseHp + cdef.hpGrowth * entry.level)} />
-        </div>
+        {/* 属性必须走 game.statsOf：它和战斗用的是同一个 charStats，
+            界面上曾经自算 baseAtk + atkGrowth*level（漏掉星级/境界/异火/装备），
+            玩家点了升星看到数字不动，反馈"升星没有属性提升" */}
+        {(() => {
+          const st = game.statsOf(id)
+          if (!st) return null
+          return (
+            <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
+              <Stat label="攻击" value={st.atk} />
+              <Stat label="防御" value={st.def} />
+              <Stat label="气血" value={st.hp} />
+            </div>
+          )
+        })()}
 
         <div className="mt-4">
           <div className="mb-1 flex justify-between text-xs text-[#a89478]">
@@ -219,11 +228,22 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
           ) : (() => {
             const c = starUpCost(entry.stars)
             const have = state.inventory[c.item] ?? 0
+            const now = game.statsOf(id)
+            const next = game.statsOf(id, entry.stars + 1)
             return (
-              <button onClick={() => game.starUp(id)} disabled={have < c.amount}
-                className="rounded border border-dq-border px-3 py-1 text-sm hover:border-dq-gold disabled:opacity-40">
-                升星 {entry.stars}★→{entry.stars + 1}★（消耗 {c.amount} {itemLabel(c.item).icon}{itemLabel(c.item).name}，拥有 {Math.floor(have)}）
-              </button>
+              <>
+                <button onClick={() => game.starUp(id)} disabled={have < c.amount}
+                  className="rounded border border-dq-border px-3 py-1 text-sm hover:border-dq-gold disabled:opacity-40">
+                  升星 {entry.stars}★→{entry.stars + 1}★（消耗 {c.amount} {itemLabel(c.item).icon}{itemLabel(c.item).name}，拥有 {Math.floor(have)}）
+                </button>
+                {/* 把"这一星到底涨多少"写在按钮旁：星级加成挂在 charStats 的加成层，
+                    光看星级字形涨了、数字不动，玩家会以为没生效（曾经的 bug 就是这么被发现的） */}
+                {now && next && (
+                  <span className="text-xs text-[#a89478]">
+                    升星后 攻击 +{next.atk - now.atk} · 防御 +{next.def - now.def} · 气血 +{next.hp - now.hp}
+                  </span>
+                )}
+              </>
             )
           })()}
         </div>

@@ -6,6 +6,7 @@ import {
   stageStats, isBossStage, zoneForStage, monsterForStage, stageCoinReward,
   labStats, isLabBoss, labDaolingReward,
   MAX_STARS, starUpCost, SHENG_SHARD_COST,
+  PITY_TIAN, PITY_QUASI, PITY_SHENG, PITY_TIAN_UPGRADE,
   rollEquip, rollEquipQuality, equipAffixSum, EQUIP_BREAKDOWN,
   SHOP_BUFFS, SHOP_GOODS,
   type CharacterDef, type Rarity, type EquipSlot, type EquipItem, type EquipAffix, type BuffKind,
@@ -64,14 +65,16 @@ export interface GameState {
   lastProgressAt: number // 上次推进关卡的时间戳：用于识别"打不死也死不了"的僵持卡关
   lab: LabState
   kills: number
-  pityCommon: number // 距离上次出地阶+的抽数
-  pityRare: number // 距离上次出天阶+的抽数
+  pityTian: number // 距上次出天阶+的抽数（保底 PITY_TIAN）
+  pityQuasi: number // 距上次出准圣+的抽数（保底 PITY_QUASI）
+  pitySheng: number // 距上次出圣阶的抽数（保底 PITY_SHENG）
   notice: string
   lastTick: number
   combatEvents: CombatEvent[]
   equipBag: EquipItem[]
   buffs: ActiveBuff[] // 商城限时增益（到期自动失效）
   shop: { date: string; counts: Record<string, number> } // 当日各商品已购次数，驱动价格递增、跨天回落
+  gifts: Record<string, number> // 一次性发放的领取标记：发放 id → 领取时间戳（防重复发，见 GIFTS）
 }
 
 /** 商城限时增益：id 对应 SHOP_BUFFS，expireAt 为失效时间戳 */
@@ -86,6 +89,28 @@ const CHAR_MAP: Record<string, CharacterDef> = Object.fromEntries(CHARACTERS.map
 export const ESSENCE_BY_RARITY: Record<Rarity, number> = { yellow: 5, xuan: 10, di: 20, tian: 35, quasi: 60, sheng: 100 }
 
 const STARTER_IDS = ['yellow_disciple', 'yellow_mercenary', 'yellow_bandit', 'yellow_hunter']
+
+/**
+ * 一次性发放表（补偿/福利）。运维侧要给全体补资源时在这里追加一条，**不要改已上线条目的 id**：
+ * 领取标记跟着存档走（state.gifts），改 id 等于让所有人重领一次。
+ *
+ * 为什么不做「直接改云端存档文件」：云端档由客户端本地档整份覆盖（saveApi 的 uploadSave 只读本地、
+ * 也不比对云端 updatedAt），一改就被玩家自己的自动备份盖掉；而发放写进**存档**后由客户端自己带上云，
+ * 玩家下次打开游戏就自动到账，不需要任何人配合操作。
+ */
+const GIFTS: { id: string; label: string; grant: (inv: Record<string, number>) => void }[] = [
+  {
+    id: 'yuanfen20_20260915',
+    label: '缘分丹 ×20',
+    grant: inv => { inv.yuanfen = num(inv.yuanfen) + 20 },
+  },
+]
+
+/** 数值兜底：缺失/非数字（存档被改坏）一律当 0，避免 NaN 顺着存档扩散 */
+function num(v: unknown): number {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
 
 function freshState(): GameState {
   const roster: Record<string, RosterEntry> = {}
@@ -105,14 +130,18 @@ function freshState(): GameState {
     lastProgressAt: Date.now(),
     lab: { battle: null, autoLab: false, highestFloor: 0, blessings: [], offer: null, offerAt: 0 },
     kills: 0,
-    pityCommon: 0,
-    pityRare: 0,
+    pityTian: 0,
+    pityQuasi: 0,
+    pitySheng: 0,
     notice: '',
     lastTick: Date.now(),
     combatEvents: [],
     equipBag: [],
     buffs: [],
     shop: { date: new Date().toDateString(), counts: {} },
+    // 全新账号直接视为「已领过」本批发放：这批补的是更新前就存在的老玩家，刚开的新号不该白拿一份
+    // （新号想要的话就是改成 {}）。⚠️ migrate 里会显式覆盖 gifts，别删那一行。
+    gifts: Object.fromEntries(GIFTS.map(g => [g.id, 0])),
   }
 }
 
@@ -210,10 +239,13 @@ class GameStore {
   state: GameState
   private listeners = new Set<() => void>()
   private saveSuspended = false // 恢复云存档时挂起本地保存，避免 reload 的 beforeunload/定时 save 覆盖刚写入的存档
+  private justGranted: string[] = [] // 本次加载刚发放的一次性物品（只用于启动提示，不写进存档）
 
   constructor() {
     this.state = this.load()
     this.applyOfflineProgress()
+    // 发放提示走 setNotice：它带 3 秒自动清除，直接写 state.notice 会永久挂在顶栏
+    if (this.justGranted.length) this.setNotice(`礼包到账：${this.justGranted.join('、')}`)
     setInterval(() => this.tick(), 100)
     setInterval(() => this.save(), 2000)
     window.addEventListener('beforeunload', () => this.save())
@@ -263,13 +295,36 @@ class GameStore {
     const highestStage = Number.isFinite(parsed.highestStage as number) ? (parsed.highestStage as number)
       : (Number.isFinite(parsed.stage as number) ? (parsed.stage as number) : base.highestStage)
 
-    return {
+    // 一次性发放：领过的（含 freshState 预置标记）直接跳过；发完把 label 记下来，启动时提示一次
+    const inventory = { ...base.inventory, ...(parsed.inventory ?? {}) }
+    const gifts: Record<string, number> = { ...(parsed.gifts as Record<string, number> | undefined) }
+    for (const g of GIFTS) {
+      if (gifts[g.id] !== undefined) continue
+      g.grant(inventory)
+      gifts[g.id] = Date.now()
+      this.justGranted.push(g.label)
+    }
+
+    // 保底计数三层化（v1.21.5）。老档只有 pityCommon（30 抽必出地阶+）和 pityRare（90 抽必出天阶+）。
+    // 老档的 pityRare 只在触发时归零，所以它**直接等于玩家的终身抽数**（线上实测 26~71），
+    // 而那个 90 抽保底全服无人触及——等于攒了几十次空手。把它继承成圣阶保底进度是对老玩家的补偿：
+    // 抽了 52 次的老号下次进游戏就有 52/60 的圣阶进度，新号则从 0 起要抽满 60。
+    const legacy = parsed as { pityCommon?: unknown; pityRare?: unknown }
+    const pityClamp = (v: unknown, max: number) => Math.min(max, Math.max(0, Math.floor(num(v))))
+    const pityTian = Number.isFinite(parsed.pityTian as number) ? pityClamp(parsed.pityTian, PITY_TIAN) : 0
+    const pityQuasi = Number.isFinite(parsed.pityQuasi as number) ? pityClamp(parsed.pityQuasi, PITY_QUASI) : 0
+    const pitySheng = Number.isFinite(parsed.pitySheng as number)
+      ? pityClamp(parsed.pitySheng, PITY_SHENG)
+      : pityClamp(legacy.pityRare, PITY_SHENG)
+
+    const out: GameState = {
       ...base,
       ...parsed,
       roster,
       team,
       battle: null,
-      inventory: { ...base.inventory, ...(parsed.inventory ?? {}) },
+      inventory,
+      gifts,
       stage: Number.isFinite(parsed.stage as number) ? (parsed.stage as number) : base.stage,
       highestStage,
       farmStage: (typeof parsed.farmStage === 'number' && parsed.farmStage >= 1 && parsed.farmStage <= highestStage) ? parsed.farmStage : null,
@@ -278,10 +333,17 @@ class GameStore {
       combatEvents: [],
       equipBag: Array.isArray(parsed.equipBag) ? parsed.equipBag.map(sanitizeEquipItem).filter((x): x is EquipItem => !!x) : [],
       buffs: Array.isArray(parsed.buffs) ? parsed.buffs.filter(b => b && typeof b.expireAt === 'number' && b.expireAt > Date.now()) : [],
+      pityTian,
+      pityQuasi,
+      pitySheng,
       shop: (parsed.shop && typeof parsed.shop.counts === 'object' && parsed.shop.counts)
         ? { date: parsed.shop.date, counts: parsed.shop.counts }
         : { date: new Date().toDateString(), counts: {} },
     }
+    // 上面 `...parsed` 会把老字段一起带进来，留着只会在存档里堆垃圾（新代码不再读它们）
+    delete (out as { pityCommon?: unknown }).pityCommon
+    delete (out as { pityRare?: unknown }).pityRare
+    return out
   }
 
   /** 挂起本地保存：恢复云存档前调用，防止 reload 时 beforeunload 的 save 把旧内存态写回覆盖 */
@@ -437,11 +499,6 @@ class GameStore {
     return (this.state.inventory[`fire_${fireId}`] ?? 0) > 0
   }
 
-  /** 异火只认主战角色（前排第一位）为主 */
-  private fireFor(charId: string): string | null {
-    return this.state.equippedFire && charId === this.state.team.front[0] ? this.state.equippedFire : null
-  }
-
   // ── 战斗：不再手选地图，关卡随击杀持续推进，怪物数值随关卡数指数成长 ──────────
   activeFighters(): string[] {
     return [...this.state.team.front, ...this.state.team.back].filter((x): x is string => !!x)
@@ -476,7 +533,7 @@ class GameStore {
     for (const id of fighters) {
       const entry = this.state.roster[id]
       const cdef = CHAR_MAP[id]
-      if (entry && cdef) fighterHp[id] = charStats(entry, cdef, this.fireFor(id)).hp
+      if (entry && cdef) fighterHp[id] = charStats(entry, cdef, this.fireIdOf(id)).hp
     }
     this.state.battle = { monsterHp: stageStats(this.fightStage()).hp, roundTimer: ROUND_SEC, fighterHp }
     this.emit()
@@ -523,7 +580,7 @@ class GameStore {
       const cdef = CHAR_MAP[id]
       const entry = this.state.roster[id]
       if (!cdef || !entry) continue
-      const stats = charStats(entry, cdef, this.fireFor(id))
+      const stats = charStats(entry, cdef, this.fireIdOf(id))
       if (cdef.role === 'heal') {
         let lowestId: string | null = null
         let lowestPct = 1
@@ -533,14 +590,14 @@ class GameStore {
           const fdef = CHAR_MAP[fid]
           const fentry = this.state.roster[fid]
           if (!fdef || !fentry) continue
-          const maxHp = charStats(fentry, fdef, this.fireFor(fid)).hp
+          const maxHp = charStats(fentry, fdef, this.fireIdOf(fid)).hp
           const pct = fhp / maxHp
           if (pct < lowestPct) { lowestPct = pct; lowestId = fid }
         }
         if (lowestId) {
           const fdef = CHAR_MAP[lowestId]
           const fentry = this.state.roster[lowestId]
-          const maxHp = fdef && fentry ? charStats(fentry, fdef, this.fireFor(lowestId)).hp : 0
+          const maxHp = fdef && fentry ? charStats(fentry, fdef, this.fireIdOf(lowestId)).hp : 0
           const heal = Math.round(stats.atk * 1.5)
           b.fighterHp[lowestId] = Math.min(maxHp, (b.fighterHp[lowestId] ?? 0) + heal)
           this.state.combatEvents.push({ type: 'heal', value: heal, who: lowestId, time: t0 + seq * SEQ_MS, source: 'main' })
@@ -571,7 +628,7 @@ class GameStore {
       const cdef = CHAR_MAP[targetId]
       const entry = this.state.roster[targetId]
       if (cdef && entry) {
-        const stats = charStats(entry, cdef, this.fireFor(targetId))
+        const stats = charStats(entry, cdef, this.fireIdOf(targetId))
         const mdmg = Math.max(0, Math.round((monster.atk - stats.def * defBuff) * (0.85 + Math.random() * 0.3)))
         b.fighterHp[targetId] = Math.max(0, (b.fighterHp[targetId] ?? 0) - mdmg)
         const tCounter = t0 + seq * SEQ_MS + 120
@@ -672,7 +729,7 @@ class GameStore {
     const entry = this.state.roster[id]
     const cdef = CHAR_MAP[id]
     if (!entry || !cdef) return null
-    const base = charStats(entry, cdef, this.fireFor(id))
+    const base = charStats(entry, cdef, this.fireIdOf(id))
     const bt = this.blessingTotals()
     return {
       atk: Math.round(base.atk * (1 + bt.atkPct / 100) * this.buffMult('atk')),
@@ -884,34 +941,60 @@ class GameStore {
   }
 
   // ── 招募抽卡 ───────────────────────────────────────────────────────────
-  private rollRarity(): Rarity {
-    this.state.pityCommon++
-    this.state.pityRare++
-    if (this.state.pityRare >= 90) {
-      this.state.pityRare = 0
-      return Math.random() < 0.15 ? 'sheng' : Math.random() < 0.4 ? 'quasi' : 'tian'
-    }
-    if (this.state.pityCommon >= 30) {
-      this.state.pityCommon = 0
+  /**
+   * 抽一档稀有度：三层保底 + 自然概率。
+   *
+   * 三层计数每次抽取各 +1，**抽到「该层或更高」就重置该层**（标准保底心智模型）：
+   *   天阶保底 PITY_TIAN(10) / 准圣保底 PITY_QUASI(30) / 圣阶保底 PITY_SHENG(60)
+   * 优先判最高层，所以三层同时到位时按圣阶结算。
+   *
+   * 为什么是这三个数：缘分丹是抽卡唯一货币，玩家终身只有 40~70 抽（推导见 data.ts 的常量注释），
+   * 保底抽数大于终身抽数就等于没做——这正是原先「90 抽必出天阶+」的问题，全服无人触发过。
+   */
+  private rollRarity(): { rarity: Rarity; pity: boolean } {
+    this.state.pityTian++
+    this.state.pityQuasi++
+    this.state.pitySheng++
+
+    let rarity: Rarity
+    let pity = true
+    if (this.state.pitySheng >= PITY_SHENG) {
+      rarity = 'sheng'
+    } else if (this.state.pityQuasi >= PITY_QUASI) {
+      rarity = 'quasi'
+    } else if (this.state.pityTian >= PITY_TIAN) {
+      rarity = Math.random() < PITY_TIAN_UPGRADE ? 'quasi' : 'tian'
+    } else {
       const r = Math.random()
-      return r < 0.05 ? 'quasi' : r < 0.25 ? 'tian' : 'di'
+      rarity = r < 0.005 ? 'sheng' : r < 0.03 ? 'quasi' : r < 0.12 ? 'tian' : r < 0.30 ? 'di' : r < 0.60 ? 'xuan' : 'yellow'
+      pity = false
     }
-    const r = Math.random()
-    if (r < 0.005) return 'sheng'
-    if (r < 0.03) return 'quasi'
-    if (r < 0.12) return 'tian'
-    if (r < 0.30) return 'di'
-    if (r < 0.60) return 'xuan'
-    return 'yellow'
+
+    // 抽到哪一档就重置「该档及以下」的计数：出圣阶等于三层全清，出准圣清掉准圣与天阶。
+    // 注意不能反过来「出了好东西就把计数清零」——那我们等于白送，保底会泛滥。
+    const order = RARITY_INFO[rarity].order
+    if (order >= RARITY_INFO.sheng.order) this.state.pitySheng = 0
+    if (order >= RARITY_INFO.quasi.order) this.state.pityQuasi = 0
+    if (order >= RARITY_INFO.tian.order) this.state.pityTian = 0
+    return { rarity, pity }
+  }
+
+  /** 保底进度：招募页要能看见「还有几抽必出」。看不见的保底 = 玩家只记得自己又空手了 */
+  pityState() {
+    return {
+      tian: { cur: this.state.pityTian, max: PITY_TIAN },
+      quasi: { cur: this.state.pityQuasi, max: PITY_QUASI },
+      sheng: { cur: this.state.pitySheng, max: PITY_SHENG },
+    }
   }
 
   recruit(times: 1 | 10) {
     const cost = times
     if ((this.state.inventory.yuanfen ?? 0) < cost) { this.setNotice('缘分丹不足'); return [] }
     this.state.inventory.yuanfen -= cost
-    const results: { id: string; isNew: boolean; rarity: Rarity }[] = []
+    const results: { id: string; isNew: boolean; rarity: Rarity; pity: boolean }[] = []
     for (let i = 0; i < times; i++) {
-      const rarity = this.rollRarity()
+      const { rarity, pity } = this.rollRarity()
       const pool = CHARACTERS.filter(c => c.rarity === rarity)
       const pick = pool[Math.floor(Math.random() * pool.length)]
       if (!pick) continue
@@ -921,7 +1004,7 @@ class GameStore {
       } else {
         this.state.inventory.essence = (this.state.inventory.essence ?? 0) + ESSENCE_BY_RARITY[rarity]
       }
-      results.push({ id: pick.id, isNew, rarity })
+      results.push({ id: pick.id, isNew, rarity, pity })
     }
     if (results.length > 0) {
       const order = RARITY_INFO
@@ -1024,16 +1107,32 @@ class GameStore {
     return [...this.state.team.front, ...this.state.team.back].filter((x): x is string => !!x)
   }
 
-  /** 异火只对上阵首位生效，口径与 charStats/combatPower 一致 */
-  private fireIdFor(charId: string): string | null {
+  /** 异火只对上阵首位生效。UI 要显示属性/战力也走这里，别在组件里自己拼这个判断 */
+  fireIdOf(charId: string): string | null {
     return this.state.equippedFire && charId === this.state.team.front[0] ? this.state.equippedFire : null
+  }
+
+  /**
+   * 某角色**当前真实**的攻击/防御/气血（含星级、境界、异火、装备词条）。
+   *
+   * UI 一律走这里，别自己写 `baseAtk + atkGrowth * level`——那正是「升星没有属性提升」的原因：
+   * 星级/境界/异火/装备全都挂在 charStats 的加成层上，界面自算的那套等于把它们全漏掉，
+   * 玩家点了升星看到数字纹丝不动（实际战斗数值已经涨了），只会认为功能坏了。
+   */
+  statsOf(charId: string, starsOverride?: number) {
+    const entry = this.state.roster[charId]
+    const cdef = CHAR_MAP[charId]
+    if (!entry || !cdef) return null
+    // starsOverride 只给界面做「升星后能涨多少」的预览用，不动存档
+    const e = starsOverride === undefined ? entry : { ...entry, stars: starsOverride }
+    return charStats(e, cdef, this.fireIdOf(charId))
   }
 
   powerOf(charId: string): number {
     const entry = this.state.roster[charId]
     const cdef = CHAR_MAP[charId]
     if (!entry || !cdef) return 0
-    return charPower(entry, cdef, this.fireIdFor(charId))
+    return charPower(entry, cdef, this.fireIdOf(charId))
   }
 
   /** 把 item 装到该角色对应槽位后它的战力（只试算，不改状态） */
@@ -1043,7 +1142,7 @@ class GameStore {
     if (!entry || !cdef) return 0
     const prev = entry.equip[item.slot]
     entry.equip[item.slot] = item
-    const p = charPower(entry, cdef, this.fireIdFor(charId))
+    const p = charPower(entry, cdef, this.fireIdOf(charId))
     if (prev) entry.equip[item.slot] = prev; else delete entry.equip[item.slot]
     return p
   }
@@ -1121,7 +1220,7 @@ class GameStore {
         if (!entry || !cdef) { empty.push(NEG); continue }
         const prev = entry.equip[slot]
         delete entry.equip[slot]
-        empty.push(charPower(entry, cdef, this.fireIdFor(id)))
+        empty.push(charPower(entry, cdef, this.fireIdOf(id)))
         if (prev) entry.equip[slot] = prev
       }
       const delta = cands.map(it => ids.map((id, c) => {
@@ -1130,7 +1229,7 @@ class GameStore {
         if (!entry || !cdef || empty[c] === NEG) return NEG
         const prev = entry.equip[slot]
         entry.equip[slot] = it
-        const d = charPower(entry, cdef, this.fireIdFor(id)) - empty[c]
+        const d = charPower(entry, cdef, this.fireIdOf(id)) - empty[c]
         if (prev) entry.equip[slot] = prev; else delete entry.equip[slot]
         return d
       }))
@@ -1259,7 +1358,7 @@ class GameStore {
         const entry = this.state.roster[id]
         const cdef = CHAR_MAP[id]
         if (!entry || !cdef) continue
-        const fireId = this.fireIdFor(id)
+        const fireId = this.fireIdOf(id)
         const curPower = cur.get(id) ?? 0
         for (let i = 0; i < pool.length; i++) {
           const item = pool[i]
