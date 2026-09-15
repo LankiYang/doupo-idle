@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
-import { useGame, game, charLabel, rarityInfo, itemLabel, ESSENCE_BY_RARITY } from '../game/engine'
+import { useGame, game, charLabel, rarityInfo, itemLabel } from '../game/engine'
 import { portraitFor } from '../game/portraits'
-import { xpToNext, realmLabel, needsPillFor, pillGradeFor, FIRES, MAX_STARS, starUpCost } from '../game/data'
+import { xpToNext, realmLabel, needsPillFor, pillGradeFor, FIRES, MAX_STARS, starUpCost, RELEASE_REFUND } from '../game/data'
 
 type AssignTarget = { row: 'front' | 'back'; index: number } | null
 
@@ -163,7 +163,9 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
   const blockedByPill = entry.xp >= need && needsPillFor(entry.level)
   const pillGrade = pillGradeFor(entry.level)
   const inTeam = [...state.team.front, ...state.team.back].includes(id)
-  const sellGain = ESSENCE_BY_RARITY[cdef.rarity]
+  // 返还明细一律走引擎（releaseRefundOf 也就是 releaseChar 实际结算用的那个方法），
+  // 组件不自己算 —— 否则"界面承诺的"和"实际到账的"迟早会对不上
+  const refund = game.releaseRefundOf(id)
 
   return (
     <div className="flex flex-col gap-4 sm:flex-row">
@@ -266,17 +268,43 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
           {inTeam ? (
             <div className="text-xs text-[#5a4a38]">上阵中的武魂不能放生，先换下来再操作</div>
           ) : confirmSell ? (
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-dq-fire">确定放生 {cdef.name}？此操作不可撤销</span>
-              <button onClick={() => { game.releaseChar(id); onSold() }}
-                className="rounded bg-dq-fire px-2 py-1 text-black">确认放生</button>
-              <button onClick={() => setConfirmSell(false)}
-                className="rounded border border-dq-border px-2 py-1 hover:border-dq-gold">取消</button>
+            <div className="rounded border border-dq-fire/50 p-2">
+              <div className="mb-1 text-xs text-dq-fire">确定放生 {cdef.name}？此操作不可撤销</div>
+              {refund && (
+                <div className="mb-2 space-y-0.5 text-[11px] leading-relaxed text-[#d8c6a8]">
+                  <div className="text-[#a89478]">
+                    返还已投入资源的 {Math.round(RELEASE_REFUND * 100)}%（角色本身的价值照给）：
+                  </div>
+                  <div>
+                     {itemLabel('essence').name} ×{refund.essence}
+                    <span className="text-[#a89478]">（本身 {refund.own} + 升星 {refund.essence - refund.own}）</span>
+                  </div>
+                  {refund.xuanjing > 0 && (
+                    <div>🔮 {itemLabel('xuanjing').name} ×{refund.xuanjing}
+                      <span className="text-[#a89478]">（投入 {refund.invested.xuanjing}）</span></div>
+                  )}
+                  {refund.crystal > 0 && (
+                    <div> {itemLabel('crystal').name} ×{refund.crystal}
+                      <span className="text-[#a89478]">（投入 {refund.invested.crystal}）</span></div>
+                  )}
+                  {Object.entries(refund.pills).map(([pid, n]) => (
+                    <div key={pid}>{itemLabel(pid).icon} {itemLabel(pid).name} ×{n}
+                      <span className="text-[#a89478]">（投入 {refund.invested.pills[pid] ?? 0}）</span></div>
+                  ))}
+                  <div className="text-[#5a4a38]">身上的装备会退回背包</div>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <button onClick={() => { game.releaseChar(id); onSold() }}
+                  className="rounded bg-dq-fire px-2 py-1 text-xs text-black">确认放生</button>
+                <button onClick={() => setConfirmSell(false)}
+                  className="rounded border border-dq-border px-2 py-1 text-xs hover:border-dq-gold">取消</button>
+              </div>
             </div>
           ) : (
             <button onClick={() => setConfirmSell(true)}
               className="rounded border border-dq-border px-2 py-1 text-xs text-[#a89478] hover:border-dq-fire hover:text-dq-fire">
-              放生（换取 {sellGain} 🩸武魂精血）
+              放生（返还养成投入的 {Math.round(RELEASE_REFUND * 100)}%）
             </button>
           )}
         </div>

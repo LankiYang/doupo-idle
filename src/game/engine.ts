@@ -5,7 +5,7 @@ import {
   xpToNext, needsPillFor, pillGradeFor, realmLabel, realmMult,
   stageStats, isBossStage, zoneForStage, monsterForStage, stageCoinReward,
   labStats, isLabBoss, labDaolingReward,
-  MAX_STARS, starUpCost, SHENG_SHARD_COST,
+  MAX_STARS, starUpCost, SHENG_SHARD_COST, refundOf, refundPillsOf, charInvestment,
   PITY_TIAN, PITY_QUASI, PITY_SHENG, PITY_TIAN_UPGRADE,
   rollEquip, rollEquipQuality, equipAffixSum, EQUIP_BREAKDOWN,
   SHOP_BUFFS, SHOP_GOODS,
@@ -449,16 +449,26 @@ class GameStore {
     const cdef = CHAR_MAP[id]
     if (!entry || !cdef) return
     const have = this.state.inventory.crystal ?? 0
-    const spend = Math.min(amount, have)
-    if (spend <= 0) return
-    this.state.inventory.crystal = have - spend
-    this.gainXp(id, spend)
+    const want = Math.min(amount, have)
+    if (want <= 0) return
+    // 只扣真正被吸收掉的部分（见 gainXp）：卡在丹药上时超出的结晶会吐回来，原实现是直接销毁
+    const spent = this.gainXp(id, want)
+    this.state.inventory.crystal = have - spent
     this.emit()
   }
 
-  private gainXp(id: string, amount: number) {
+  /**
+   * 加经验并结算升级，返回**实际吸收掉的量**（≤ amount）。
+   *
+   * 原实现在卡丹药时写 `entry.xp = need`，把超出 need 的那截经验静默销毁了——
+   * 玩家把打坐滑条拉满点到「缺丹药」的角色身上，那部分灵晶就凭空没了。
+   * 现在超出的部分不计入消耗，由 trainChar 退回。这条不变量还是放生返还的前提：
+   * 1 结晶 = 1 经验，经验只被升级消耗 ⇒ 才能从 level/xp 反推出累计投入（见 data.charInvestment）。
+   */
+  private gainXp(id: string, amount: number): number {
     const entry = this.state.roster[id]
-    if (!entry) return
+    if (!entry || amount <= 0) return 0
+    let absorbed = amount
     entry.xp += amount
     while (true) {
       const need = xpToNext(entry.level)
@@ -466,7 +476,12 @@ class GameStore {
       if (needsPillFor(entry.level)) {
         const grade = pillGradeFor(entry.level)
         const pid = `pill${grade}`
-        if ((this.state.inventory[pid] ?? 0) < 1) { entry.xp = need; break }
+        if ((this.state.inventory[pid] ?? 0) < 1) {
+          const overflow = entry.xp - need
+          entry.xp = need
+          absorbed -= overflow
+          break
+        }
         this.state.inventory[pid] -= 1
         this.setNotice(`⚡ ${CHAR_MAP[id]?.name} 服丹突破！${realmLabel(entry.level + 1)}`)
         playSound('breakthrough')
@@ -474,6 +489,7 @@ class GameStore {
       entry.xp -= need
       entry.level += 1
     }
+    return absorbed
   }
 
   // ── 阵容 ───────────────────────────────────────────────────────────────
@@ -1016,9 +1032,14 @@ class GameStore {
   }
 
   /**
-   * 卖出/放生角色：换取武魂精血（价格同重复抽到时的转换表），
-   * 解决"抽卡能重复但拿到的东西完全没有主动处理渠道"的问题。
-   * 上阵中的角色不能卖，防止手滑把正在用的队友卖掉。
+   * 卖出/放生角色：**角色本身的精血**（价格同重复抽到时的转换表）+ **70% 的养成投入**
+   * （灵晶 / 突破丹药 / 升星的精血与玄晶）。
+   *
+   * 投入是从 level/xp/stars 反推的（见 data.charInvestment），不需要在存档里记账，
+   * 所以老存档放生照样拿得到完整返还。留 30% 是刻意的：换阵容可以有成本，但不该像
+   * 原来那样"练过的角色一放生，练度全打水漂"——玩家于是不敢练新抽到的角色。
+   *
+   * 上阵中的角色不能卖，防止手滑把正在用的队友卖掉；身上装备原样退回背包。
    */
   releaseChar(id: string) {
     const cdef = CHAR_MAP[id]
@@ -1028,12 +1049,49 @@ class GameStore {
       this.setNotice('上阵中的武魂不能卖出，先把TA换下来')
       return
     }
+    const r = this.releaseRefundOf(id)
+    if (!r) return
     for (const item of Object.values(entry.equip)) this.state.equipBag.push(item)
     delete this.state.roster[id]
-    const gain = ESSENCE_BY_RARITY[cdef.rarity]
-    this.state.inventory.essence = (this.state.inventory.essence ?? 0) + gain
-    this.setNotice(`放生了 ${cdef.name}，获得 ${gain} 武魂精血`)
+
+    const inv = this.state.inventory
+    inv.essence = (inv.essence ?? 0) + r.essence
+    if (r.xuanjing > 0) inv.xuanjing = (inv.xuanjing ?? 0) + r.xuanjing
+    if (r.crystal > 0) inv.crystal = (inv.crystal ?? 0) + r.crystal
+    for (const [pid, n] of Object.entries(r.pills)) if (n > 0) inv[pid] = (inv[pid] ?? 0) + n
+
+    const parts = [`${r.essence} ${itemLabel('essence').name}`]
+    if (r.xuanjing > 0) parts.push(`${r.xuanjing} ${itemLabel('xuanjing').name}`)
+    if (r.crystal > 0) parts.push(`${r.crystal} ${itemLabel('crystal').name}`)
+    for (const [pid, n] of Object.entries(r.pills)) if (n > 0) parts.push(`${n} ${itemLabel(pid).name}`)
+    this.setNotice(`放生了 ${cdef.name}，返还 ${parts.join(' · ')}`)
     this.emit()
+  }
+
+  /**
+   * 放生返还明细。**UI 预览与 releaseChar 必须都调这一个方法**——两处各算一遍迟早会分叉
+   * （同一件事有两份实现，本项目已经栽过三次：战力取整口径、装备词条比较、属性面板）。
+   */
+  releaseRefundOf(id: string) {
+    const cdef = CHAR_MAP[id]
+    const entry = this.state.roster[id]
+    if (!cdef || !entry) return null
+    const invested = charInvestment(entry.level, entry.xp, entry.stars)
+    const pills: Record<string, number> = {}
+    for (const [pid, n] of Object.entries(invested.pills)) {
+      const back = refundPillsOf(n)
+      if (back > 0) pills[pid] = back
+    }
+    // 角色本身的价值按稀有度转换表照给，与「重复抽到转精血」同一把尺子
+    const own = ESSENCE_BY_RARITY[cdef.rarity]
+    return {
+      own,
+      essence: own + refundOf(invested.essence),
+      xuanjing: refundOf(invested.xuanjing),
+      crystal: refundOf(invested.crystal),
+      pills,
+      invested,
+    }
   }
 
   // ── 升星 ───────────────────────────────────────────────────────────────

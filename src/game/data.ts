@@ -447,6 +447,75 @@ export function starUpCost(stars: number): { item: 'essence' | 'xuanjing'; amoun
   return { item: 'xuanjing', amount: (next - STAR_ESSENCE_CAP) * 8 }
 }
 
+// ── 放生返还 ──────────────────────────────────────────────────────────────
+/** 放生返还比例：退回角色的养成投入，留 30% 当作换阵容的成本 */
+export const RELEASE_REFUND = 0.7
+
+/**
+ * 按比例返还并向下取整。**必须带 eps**：`90 × 0.7` 在 IEEE754 里是 62.99999999999999，
+ * 直接 Math.floor 会少退 1。投入越"整"越容易踩到（30 → 21 是准的，90 → 63 就掉成 62）。
+ */
+export function refundOf(invested: number): number {
+  return Math.floor(invested * RELEASE_REFUND + 1e-6)
+}
+
+/**
+ * 丹药的返还取整走四舍五入而不是向下取整：丹药是整颗的，而一个角色对某一品阶通常只吃
+ * 1~3 颗，向下取整会让"花了 1 颗"变成"退 0 颗"——玩家看到的是"丹药根本没退"。
+ */
+export function refundPillsOf(count: number): number {
+  return Math.round(count * RELEASE_REFUND)
+}
+
+/** 反推投入时的等级闸门：畸形存档里 level 可能是 1e9，不设上限会把循环拖死 */
+const INVEST_LEVEL_CAP = 2000
+
+export interface CharInvestment {
+  crystal: number // 打坐修炼消耗的斗气结晶
+  pills: Record<string, number> // 突破消耗的丹药：id → 颗数
+  essence: number // 升星 1~5★ 消耗的武魂精血
+  xuanjing: number // 升星 6~10★ 消耗的玄晶
+}
+
+/**
+ * 反推一个角色已经吃进去的养成资源。**只由 level / xp / stars 三个字段决定**——
+ * 不在存档里额外记账，所以老存档放生也能算出完整投入，迁移零风险、也不会算漏。
+ *
+ * 灵晶之所以能这么反推，靠的是两条不变量：
+ *   1. 1 结晶 = 1 经验（trainChar 原样把结晶数交给 gainXp）；
+ *   2. 经验只被升级消耗（xpToNext 是唯一出口）。
+ * 于是「∑ 各级所需经验 + 当前余量」= 累计投入的结晶，最后那一截还没换升级的余量也算投入
+ * （结晶确实已经花掉了）。
+ * ⚠️ 不变量 1 依赖 trainChar 不再吞掉溢出结晶——见引擎 gainXp 的返回值。
+ */
+export function charInvestment(level: number, xp: number, stars: number): CharInvestment {
+  const lv = Number.isFinite(level) ? Math.floor(level) : 1
+  const cap = Math.min(Math.max(1, lv), INVEST_LEVEL_CAP)
+  const cur = Number.isFinite(xp) ? Math.max(0, xp) : 0
+  const st = Math.min(Number.isFinite(stars) ? Math.max(0, Math.floor(stars)) : 0, MAX_STARS)
+
+  const pills: Record<string, number> = {}
+  let crystal = cur
+  for (let L = 1; L < cap; L++) {
+    crystal += xpToNext(L)
+    // 每跨一个大境界吃 1 颗，品阶由「当前所在境界」决定（与 gainXp 里的判定逐字一致）
+    if (needsPillFor(L)) {
+      const pid = `pill${pillGradeFor(L)}`
+      pills[pid] = (pills[pid] ?? 0) + 1
+    }
+  }
+
+  let essence = 0
+  let xuanjing = 0
+  for (let s = 0; s < st; s++) {
+    const c = starUpCost(s)
+    if (c.item === 'essence') essence += c.amount
+    else xuanjing += c.amount
+  }
+
+  return { crystal, pills, essence, xuanjing }
+}
+
 // ── 装备系统 ──────────────────────────────────────────────────────────────
 // 设计取舍（相对参考项目 vue-idle-game 的关键改动）：源项目角色成长是简单线性，
 // 词条可以用"+11 攻击力"这种绝对数值。咱们的角色数值有 REALM_POWER 乘法加成，
