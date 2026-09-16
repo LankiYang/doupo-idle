@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useGame, game, charLabel, charStats, rarityInfo, fmtNum } from '../game/engine'
 import { portraitFor } from '../game/portraits'
 import { equipSlotIcon } from '../game/equipIcons'
@@ -12,35 +12,70 @@ function breakdownText(item: EquipItem): string {
   return b.xuanjing ? `武魂精血 ×${b.essence} · 玄晶 ×${b.xuanjing}` : `武魂精血 ×${b.essence}`
 }
 
-function AffixLine({ a, strong }: { a: EquipAffix; strong?: boolean }) {
-  const suffix = a.type === 'critRate' || a.type === 'critDmg' ? '%' : '%'
+/**
+ * 一条词条。数值颜色直接编码 a.roll（品质位）—— 这个字段从装备系统上线起就存在，
+ * 却一直没在界面上露过面，玩家只看得到数值、无从判断"这条是不是洗好了"。
+ * roll ≥ 1 表示这条是**洗练突破自然上限**的（自然掉落永远到不了 1），加 ✦ 标记。
+ */
+function AffixLine({ a, strong, right }: { a: EquipAffix; strong?: boolean; right?: ReactNode }) {
+  const tone = strong ? 'text-dq-gold'
+    : a.roll >= 1 ? 'text-[#ffd76a]'
+      : a.roll >= 0.8 ? 'text-[#e8dcc8]'
+        : a.roll >= 0.5 ? 'text-[#c9bda4]' : 'text-[#8a7658]'
   return (
-    <div className={`flex justify-between ${strong ? 'text-dq-gold' : 'text-[#c9bda4]'}`}>
+    <div className={`flex items-center gap-2 ${tone}`}>
       <span>{AFFIX_LABEL[a.type]}</span>
-      <span>+{a.value}{suffix}</span>
+      <span className="ml-auto whitespace-nowrap">
+        +{a.value}%{a.roll >= 1 && <span className="ml-0.5 text-[9px] text-dq-fire">✦</span>}
+      </span>
+      {right}
     </div>
   )
 }
 
 /** 装备详情：点击触发的浮层，桌面/触屏统一交互（原先用 hover 展示，触屏设备完全摸不到） */
-function ItemDetailModal({ item, compare, onBreakdown, onClose }: {
-  item: EquipItem; compare?: number | null; onBreakdown?: () => void; onClose: () => void
+function ItemDetailModal({ item, compare, onBreakdown, onReforge, reforgeMsg, onClose }: {
+  item: EquipItem; compare?: number | null; onBreakdown?: () => void
+  onReforge?: (idx: number) => void; reforgeMsg?: string; onClose: () => void
 }) {
+  const state = useGame()
   const color = rarityInfo(item.quality).color
   const icon = equipSlotIcon(item.slot)
   // 显示战力是整数（引擎侧 Math.round），所以 ±0.5 以内的差异肉眼看不见，
   // 显示成"战力 +0"会让玩家以为界面坏了 —— 不到 1 点一律说"持平"。
   const cmp = typeof compare === 'number' ? Math.round(compare) : null
+  const cost = game.reforgeCost(item.quality)
+  // 黄阶没有额外词条、也就没有洗练（cost.coin 为 0），此时整块洗练 UI 都不该出现
+  const canReforge = !!onReforge && item.extra.length > 0 && cost.coin > 0
+  const afford = (state.inventory.coin ?? 0) >= cost.coin
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div className="w-56 rounded border p-3 text-xs" style={{ borderColor: color }} onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/75 p-4" onClick={onClose}>
+      <div className="max-h-[85vh] w-64 overflow-auto rounded border bg-dq-panel p-3 text-xs shadow-2xl" style={{ borderColor: color }} onClick={e => e.stopPropagation()}>
         <div className="mb-1 flex items-center gap-2">
           {icon && <img src={icon} alt={item.slot} className="h-10 w-10 rounded object-cover" />}
           <div style={{ color }}>{item.name}</div>
         </div>
         <div className="mb-2 text-[11px] text-[#a89478]">{SLOT_INFO[item.slot].label} · {rarityInfo(item.quality).label}</div>
+        {/* 先天词条不给洗练按钮：它是槽位的身份（戒指必给暴击率），洗掉这个概念就不成立了 */}
         <AffixLine a={item.innate} strong />
-        {item.extra.map((a, i) => <AffixLine key={i} a={a} />)}
+        {item.extra.map((a, i) => (
+          <AffixLine key={i} a={a} right={canReforge ? (
+            <button onClick={() => onReforge!(i)} disabled={!afford} data-affix-idx={i}
+              className={`rounded border px-1.5 py-0.5 text-[10px] ${afford
+                ? 'border-dq-border text-[#e8dcc8] hover:border-dq-fire'
+                : 'border-[#3a2a1a] text-[#5a4a38]'}`}>洗练</button>
+          ) : undefined} />
+        ))}
+        {/* 花在按钮上明示，不再弹确认框：洗练是要反复点的动作，每次确认反而折磨人 */}
+        {canReforge && (
+          <div className="mt-2 text-[10px]">
+            <div className="text-[#a89478]">洗练一条（类型与数值都重掷，价格固定不涨）</div>
+            <div className={afford ? 'text-[#c9bda4]' : 'text-red-400'}>
+              灵金 ×{fmtNum(cost.coin)}
+            </div>
+          </div>
+        )}
+        {reforgeMsg && <div className="mt-1 text-[11px] text-dq-gold">{reforgeMsg}</div>}
         {cmp !== null && (
           <div className={`mt-2 text-[11px] ${cmp >= 1 ? 'text-green-400' : 'text-[#5a4a38]'}`}>
             对该武魂：{cmp >= 1 ? `战力 +${fmtNum(cmp)}` : cmp <= -1 ? '不如当前穿戴' : '≈ 持平（战力不变）'}
@@ -67,6 +102,7 @@ export default function EquipmentView() {
   const [peekItem, setPeekItem] = useState<EquipItem | null>(null)
   const [junkPreview, setJunkPreview] = useState<{ count: number; essence: number; xuanjing: number } | null>(null)
   const [toast, setToast] = useState('')
+  const [reforgeMsg, setReforgeMsg] = useState('')
 
   if (teamIds.length === 0 || !selectedChar) {
     return <div className="flex flex-1 items-center justify-center text-sm text-[#a89478]">先去阵容页编排队伍，再来管理装备</div>
@@ -81,6 +117,24 @@ export default function EquipmentView() {
 
   const bagSorted = [...state.equipBag].sort((a, b) => rarityInfo(b.quality).order - rarityInfo(a.quality).order)
   const isInBag = (item: EquipItem) => state.equipBag.some(i => i.id === item.id)
+
+  /** 打开详情浮层。必须清掉上一次的洗练提示，否则换个装备打开会显示成"刚洗出的结果" */
+  function openItem(item: EquipItem) {
+    setReforgeMsg('')
+    setPeekItem(item)
+  }
+
+  /**
+   * 洗练一条额外词条。不做二次确认：消耗已经明示在按钮旁边，而且这是要反复点的动作。
+   * peekItem 是 state 里的同一个对象引用，引擎就地改写了它的 extra[idx]，
+   * 所以这里只需更新提示文案，浮层里的词条会跟着重渲染成新值。
+   */
+  function doReforge(idx: number) {
+    if (!peekItem) return
+    const r = game.reforgeEquip(peekItem.id, idx)
+    if (!r.ok || !r.affix) { setReforgeMsg(` ${r.why ?? '洗练失败'}`); return }
+    setReforgeMsg(`✦ 洗练完成：${AFFIX_LABEL[r.affix.type]} +${r.affix.value}%`)
+  }
 
   function doAutoEquip() {
     const r = game.autoEquipBest()
@@ -194,10 +248,10 @@ export default function EquipmentView() {
                 const gained = Math.round(gain)
                 return (
                   <div key={item.id} className="relative rounded border p-1.5 text-center text-[10px]" style={{ borderColor: color }}>
-                    <button onClick={() => setPeekItem(item)} className="mx-auto block h-10 w-10 overflow-hidden rounded bg-black/30">
+                    <button onClick={() => openItem(item)} className="mx-auto block h-10 w-10 overflow-hidden rounded bg-black/30">
                       {icon && <img src={icon} alt={item.slot} className="h-full w-full object-cover" />}
                     </button>
-                    <button onClick={() => setPeekItem(item)} className="w-full truncate" style={{ color }}>{item.name}</button>
+                    <button onClick={() => openItem(item)} className="w-full truncate" style={{ color }}>{item.name}</button>
                     <div className={`mt-0.5 text-[9px] ${gained >= 1 ? 'text-green-400' : 'text-[#5a4a38]'}`}>
                       {gained >= 1 ? `↑ 战力 +${fmtNum(gained)}` : gained <= -1 ? '不如当前' : '≈ 持平'}
                     </div>
@@ -205,12 +259,8 @@ export default function EquipmentView() {
                       <button onClick={() => game.equipItem(selectedChar, item.id)}
                         className="w-full rounded bg-dq-gold py-0.5 text-black">穿戴</button>
                     </div>
-                    <div className="mt-0.5 flex gap-1">
-                      <button onClick={() => game.sellEquip(item.id)}
-                        className="flex-1 rounded border border-dq-border hover:border-dq-gold">卖</button>
-                      <button onClick={() => game.breakdownEquip(item.id)}
-                        className="flex-1 rounded border border-dq-border hover:border-dq-fire">分解</button>
-                    </div>
+                    <button onClick={() => game.breakdownEquip(item.id)}
+                      className="mt-0.5 w-full rounded border border-dq-border py-0.5 hover:border-dq-fire">分解</button>
                   </div>
                 )
               })}
@@ -223,12 +273,14 @@ export default function EquipmentView() {
         <ItemDetailModal item={peekItem}
           compare={isInBag(peekItem) ? game.powerIfEquipped(selectedChar, peekItem) - basePower : null}
           onBreakdown={isInBag(peekItem) ? () => { game.breakdownEquip(peekItem.id); setPeekItem(null) } : undefined}
-          onClose={() => setPeekItem(null)} />
+          onReforge={doReforge}
+          reforgeMsg={reforgeMsg}
+          onClose={() => { setPeekItem(null); setReforgeMsg('') }} />
       )}
 
       {junkPreview && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4" onClick={() => setJunkPreview(null)}>
-          <div className="w-64 rounded border border-dq-fire p-3 text-xs" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/75 p-4" onClick={() => setJunkPreview(null)}>
+          <div className="w-64 rounded border border-dq-fire bg-dq-panel p-3 text-xs shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="mb-2 text-dq-fire">确认批量分解？</div>
             <div className="space-y-1 text-[#c9bda4]">
               <div>将分解 <span className="text-[#e8dcc8]">{junkPreview.count}</span> 件装备</div>

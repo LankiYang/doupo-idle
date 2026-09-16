@@ -190,7 +190,7 @@ for (let t = 0; t < TRIALS; t++) {
   if (owned.size > best.n) best = { n: owned.size }
 }
 console.log(`  初始 5 抽（且永久无法再获得缘分丹）→ 平均拥有 ${(totalUnique / TRIALS).toFixed(1)} 名角色，最好情况 ${best.n} 名`)
-console.log(`  名录总数 26 名 → 实际永久无缘 ${26 - Math.round(totalUnique / TRIALS)} 名左右`)
+console.log(`  名录总数 54 名 → 实际永久无缘 ${54 - Math.round(totalUnique / TRIALS)} 名左右`)
 
 console.log('\n═══ 3. 真实可达上限（只有 9 名角色、无缘分丹） ═══')
 // 现实池：4 初始 + 5 抽（取一个中位数好运结果：拿到 1 地阶治疗以下的常见组合）

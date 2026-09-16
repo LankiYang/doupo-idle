@@ -39,7 +39,7 @@ function cs(e,cd,fire){const sm=1+e.stars*0.08, rm=realmMult(e.level)
   let a=(cd.baseAtk+cd.atkGrowth*e.level)*sm*rm,d=(cd.baseDef+cd.defGrowth*e.level)*sm*rm,h=(cd.baseHp+cd.hpGrowth*e.level)*sm*rm
   if(fire){a*=1+(fire.atk??0)/100;d*=1+(fire.def??0)/100;h*=1+(fire.hp??0)/100}
   return{atk:Math.round(a),def:Math.round(d),hp:Math.round(h)}}
-function zD(s){ if(s>=60)return[{i:'pill6',c:0.12,mn:1,mx:2},{i:'xuanjing',c:0.12,mn:1,mx:2},{i:'shard_sheng',c:0.04,mn:1,mx:1}]
+function zD(s){ if(s>=60)return[{i:'pill6',c:0.12,mn:1,mx:2},{i:'xuanjing',c:0.12,mn:1,mx:2},{i:'shard',c:0.01,mn:1,mx:1}]
   if(s>=45)return[{i:'pill5',c:0.15,mn:1,mx:2},{i:'xuanjing',c:0.06,mn:1,mx:1}]
   if(s>=32)return[{i:'pill4',c:0.18,mn:1,mx:2}]
   if(s>=20)return[{i:'pill3',c:0.2,mn:1,mx:2}]
@@ -49,21 +49,35 @@ const FIRE_STAGE={10:{atk:10},25:{atk:20},50:{def:20},100:{atk:35}}
 const FIRE_FLOOR={20:{hp:25},40:{atk:15,def:15,hp:15}}
 const MAX_STARS=10, STAR_ESS_CAP=5
 const starCost=s=>{const n=s+1; return n<=STAR_ESS_CAP?{item:'essence',amt:n*15}:{item:'xuanjing',amt:(n-STAR_ESS_CAP)*8}}
-const SHARD_COST=30
+// 角色碎片（v1.25）：**只有准圣/圣阶**重复转碎片（低阶仍退武魂精血），碎片按品阶固定价
+// 兑换**未拥有**角色。两张表都要与 src/game/data.ts 的 DUPE_SHARD / SHARD_COST 一致。
+// 兑换价 ÷ 转化量恒为 6（圣 60÷10、准圣 30÷5）——同一个品阶要重复抽到 6 次才够换 1 个新的。
+const DUPE_SHARD={quasi:5,sheng:10}
+const ESSENCE_BY_RARITY={yellow:5,xuan:10,di:20,tian:35,quasi:60,sheng:100}
+const SHARD_COST={yellow:2,xuan:4,di:8,tian:16,quasi:30,sheng:60}
+const ORD={yellow:0,xuan:1,di:2,tian:3,quasi:4,sheng:5}
 const BLESS=[{atkPct:15},{defPct:20},{hpPct:25},{lifesteal:10},{atkPct:10},{pierce:20},{dodge:10},{daolingPct:50},{coinPct:50},{crystalPct:30}]
 
-function rollRar(p){p.c++;p.r++
-  if(p.r>=90){p.r=0;return Math.random()<0.15?'sheng':Math.random()<0.4?'quasi':'tian'}
-  if(p.c>=30){p.c=0;const r=Math.random();return r<0.05?'quasi':r<0.25?'tian':'di'}
-  const r=Math.random()
-  if(r<0.005)return'sheng'; if(r<0.03)return'quasi'; if(r<0.12)return'tian'; if(r<0.30)return'di'
-  if(r<0.60)return'xuan'; return'yellow'}
+// 三层保底（v1.21.5 起）：天 10 / 准圣 30 / 圣 60，与 engine.rollRarity 同口径。
+// 这里原本是 90/30 的两层老口径，从 v1.21.5 起就没同步过——模拟脚本口径漂了，
+// 跑出来的抽卡产出就是错的，据此调数值等于拿错尺子量。
+function rollRar(p){p.t++;p.q++;p.s++
+  let rar
+  if(p.s>=60)rar='sheng'
+  else if(p.q>=30)rar='quasi'
+  else if(p.t>=10)rar=Math.random()<0.1?'quasi':'tian'
+  else{const r=Math.random()
+    rar=r<0.005?'sheng':r<0.03?'quasi':r<0.12?'tian':r<0.30?'di':r<0.60?'xuan':'yellow'}
+  if(ORD[rar]>=ORD.sheng)p.s=0
+  if(ORD[rar]>=ORD.quasi)p.q=0
+  if(ORD[rar]>=ORD.tian)p.t=0
+  return rar}
 
 function trial(horizonDays){
-  const st={t:0,roster:{},inv:{coin:200,crystal:0,herb:0,essence:0,daoling:0},stage:1,hiStage:1,fire:null,
+  const st={t:0,roster:{},inv:{coin:200,crystal:0,herb:0,essence:0,daoling:0,shard:0},stage:1,hiStage:1,fire:null,
     labFloor:1,labHi:0,labBless:[],labActive:true}
   const owned=new Set(['yellow_disciple','yellow_mercenary','yellow_bandit','yellow_hunter'])
-  const pity={c:0,r:0}
+  const pity={t:0,q:0,s:0}
   for(let i=0;i<5;i++){const rar=rollRar(pity);const c=ALL.filter(x=>x.rarity===rar);owned.add(c[Math.floor(Math.random()*c.length)].id)}
   for(const id of owned) st.roster[id]={level:1,xp:0,stars:0}
   const OW=[...owned]
@@ -90,19 +104,22 @@ function trial(horizonDays){
         if(c.item==='essence'&&st.inv.daoling>=10){st.inv.daoling-=10;st.inv.essence+=20;continue}
         break}}
     for(const g of [5,3,1]){while(st.inv.daoling>=g*15){st.inv.daoling-=g*15;st.inv['pill'+g]=(st.inv['pill'+g]??0)+1}}
-    // 圣阶碎片兑换
-    while((st.inv.shard_sheng??0)>=SHARD_COST){
-      const pool=ALL.filter(c=>c.rarity==='sheng'&&!st.roster[c.id])
-      if(!pool.length)break
-      st.inv.shard_sheng-=SHARD_COST
-      const p=pool[Math.floor(Math.random()*pool.length)]
-      st.roster[p.id]={level:1,xp:0,stars:0}; OW.push(p.id); team=pick()}
+    // 角色碎片兑换：从高品阶往下扫，凑够就换一名尚未拥有的（模拟玩家的自然偏好：越高阶越想要）。
+    // 换完立刻重排阵容——新角色可能比在场的高战，换而不上等于没换。
+    for(const q of ['sheng','quasi','tian','di','xuan','yellow']){
+      while((st.inv.shard??0)>=SHARD_COST[q]){
+        const pool=ALL.filter(c=>c.rarity===q&&!st.roster[c.id])
+        if(!pool.length)break
+        st.inv.shard-=SHARD_COST[q]
+        const p=pool[Math.floor(Math.random()*pool.length)]
+        st.roster[p.id]={level:1,xp:0,stars:0}; OW.push(p.id); team=pick()}}
     // 缘分丹抽卡：攒到 10 颗就十连
     while((st.inv.yuanfen??0)>=10){st.inv.yuanfen-=10
       for(let i=0;i<10;i++){const rar=rollRar(pity)
         const cand=ALL.filter(x=>x.rarity===rar); const p=cand[Math.floor(Math.random()*cand.length)]
         if(!st.roster[p.id]){st.roster[p.id]={level:1,xp:0,stars:0};OW.push(p.id)}
-        else st.inv.essence+=({yellow:5,xuan:10,di:20,tian:35,quasi:60,sheng:100})[rar]}
+        else if(DUPE_SHARD[rar])st.inv.shard+=DUPE_SHARD[rar]
+        else st.inv.essence+=ESSENCE_BY_RARITY[rar]}
       team=pick()}}
   function spend(){let gd=0
     while(gd++<200000){let bi=null,be=0
@@ -211,14 +228,14 @@ for(const h of HS){
   const rs=runs.map(r=>r.marks.find(m=>m.h===h)).filter(Boolean)
   if(!rs.length)continue
   const avg=k=>(rs.reduce((a,b)=>a+b[k],0)/rs.length).toFixed(0)
-  console.log(`  ${fmtH(h).padEnd(8)}  第 ${avg('stage').padStart(3)} 关     ${avg('labHi').padStart(3)} 层     ${avg('lv').padStart(4)} 级      ${avg('stars').padStart(2)} ★      ${avg('chars').padStart(2)} / 26`)
+  console.log(`  ${fmtH(h).padEnd(8)}  第 ${avg('stage').padStart(3)} 关     ${avg('labHi').padStart(3)} 层     ${avg('lv').padStart(4)} 级      ${avg('stars').padStart(2)} ★      ${avg('chars').padStart(2)} / 54`)
 }
 console.log('\n  ── 1 年后终局 ──')
 for(const [i,r] of runs.entries()){
   const st=r.st
-  console.log(`  第${i+1}次：角色 ${Object.keys(st.roster).length}/26  主线第${st.hiStage}关  塔${st.labHi}层  ` +
+  console.log(`  第${i+1}次：角色 ${Object.keys(st.roster).length}/54  主线第${st.hiStage}关  塔${st.labHi}层  ` +
     `等级${Math.max(...r.team.map(id=>st.roster[id].level))}  星级${Math.max(...r.team.map(id=>st.roster[id].stars))}★  ` +
-    `异火${st.fireObj?'有':'无'}  玄晶${Math.floor(st.inv.xuanjing??0)}  碎片${Math.floor(st.inv.shard_sheng??0)}`)
+    `异火${st.fireObj?'有':'无'}  玄晶${Math.floor(st.inv.xuanjing??0)}  碎片${Math.floor(st.inv.shard??0)}`)
 }
 const avgStage=(runs.reduce((a,r)=>a+r.st.hiStage,0)/runs.length).toFixed(0)
 const avgLab=(runs.reduce((a,r)=>a+r.st.labHi,0)/runs.length).toFixed(0)

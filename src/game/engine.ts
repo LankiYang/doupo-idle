@@ -5,40 +5,176 @@ import {
   xpToNext, needsPillFor, pillGradeFor, realmLabel, realmMult,
   stageStats, isBossStage, zoneForStage, monsterForStage, stageCoinReward,
   labStats, isLabBoss, labDaolingReward,
-  MAX_STARS, starUpCost, SHENG_SHARD_COST, refundOf, refundPillsOf, charInvestment,
+  enemyUnitsForStage, enemyUnitsForFloor, DUTY_OF_ROLE, bondBonusesFor,
+  MAX_STARS, starUpCost, starMultOf, starTierIndex, starTierOf, DUPE_SHARD, SHARD_COST,
+  refundOf, refundPillsOf, charInvestment,
   PITY_TIAN, PITY_QUASI, PITY_SHENG, PITY_TIAN_UPGRADE,
-  rollEquip, rollEquipQuality, equipAffixSum, EQUIP_BREAKDOWN,
+  rollEquip, rollEquipQuality, equipAffixSum, EQUIP_BREAKDOWN, EQUIP_REFORGE, rollReforgedAffix,
   SHOP_BUFFS, SHOP_GOODS,
   type CharacterDef, type Rarity, type EquipSlot, type EquipItem, type EquipAffix, type BuffKind,
+  type EnemyUnit, type Role, type AtkStyle, type BondBonuses, type ControlDebuff,
 } from './data'
 import { playSound } from './sound'
+import { fetchRemoteRewards, type RemoteReward } from './rewards'
 
 export interface RosterEntry { level: number; xp: number; stars: number; equip: Partial<Record<EquipSlot, EquipItem>> }
 
+/** 洗练结果。失败一律带 why 给玩家看 —— 洗练是玩家要反复点的按钮，"点了没反应"最难排查 */
+export interface ReforgeResult { ok: boolean; why?: string; affix?: EquipAffix }
+
 const EQUIP_SLOTS: EquipSlot[] = ['weapon', 'armor', 'accessory', 'ring']
-/** 暴击伤害基础倍率：没有戒指/词条时暴击率为 0，此值不生效；有暴击后按此为基准叠加装备的暴击伤害词条 */
-const BASE_CRIT_DMG = 50
+/** 暴击伤害基础倍率：没有戒指/词条时暴击率为 0，此值不生效；有暴击后按此为基准叠加装备的暴击伤害词条。
+ *  导出给界面用（结缘页要显示未拥有角色的初始暴击伤害）—— 显示的是这个常量本身，不是复述它的算式。 */
+export const BASE_CRIT_DMG = 50
 /** 单次掉落判定的基础概率，首领额外加成见 onKill/labOnKill */
 const EQUIP_DROP_CHANCE = 0.06
 const EQUIP_DROP_CHANCE_BOSS = 0.35
 export type TeamSlot = string | null
+/** 阵位坐标（拖拽/换位用）：哪一排的第几格 */
+export type TeamSlotPos = { row: 'front' | 'back'; index: number }
+
+/** 阵容格数（v1.28：5 → 6）。前排 3 格是承伤位，后排 3 格是输出/治疗位 */
+export const TEAM_FRONT_SIZE = 3
+export const TEAM_BACK_SIZE = 3
 
 export interface BattleState {
-  monsterHp: number
+  /** 本场战斗的敌方阵容：开战时一次性定妥（见 data.ts 的 EnemyUnit），战斗中只有 hp / debuff 会变 */
+  enemies: EnemyUnit[]
   roundTimer: number
   fighterHp: Record<string, number>
+  /** 当前这一波已经打了几个回合（清波归零）。敌方治疗量按它衰减，见 ENEMY_HEAL_RATIO */
+  rounds?: number
+  /**
+   * 我方队员身上的压制（由敌方 `control` 施加，见 CONTROL_DEBUFF）。
+   *
+   * 这里用 map 而敌方的减益挂在单位上，是因为**我方队伍在清波时不会重建**，
+   * 没有"换了一批新对象"来自动清掉旧状态，只能自己按回合递减。
+   *
+   * 可选字段：战斗状态读档时一律置 null（见 migrate），所以它其实不跨存档；
+   * 标成可选只是让 `startBattle` 之外的构造点（测试夹具）不必逐个填。
+   */
+  fighterDebuff?: Record<string, ControlDebuff>
 }
 
-export interface CombatEvent { type: 'dmg' | 'heal' | 'monsterDmg' | 'kill' | 'drop' | 'down'; value: number; who?: string; item?: string; time: number; source: 'main' | 'lab'; crit?: boolean; boss?: boolean }
+/**
+ * 战斗演出事件。
+ *
+ * 三个指向字段的语义（多单位战斗后需要分得清"谁打了谁"，v1.28 起）：
+ * - `who`  **永远指我方**：dmg/heal 时是出手/被治的角色 id，monsterDmg/down 时是挨打的角色 id
+ * - `target` 我方出手的敌方单位 uid（dmg）
+ * - `from`   敌方出手的单位 uid（monsterDmg）
+ *
+ * 「who 永远指我方」是刻意的——FighterCard 靠 `e.who === id` 找自己该播的动画，
+ * 让它同时兼作敌方标识会把每个受击分支都拆成两半。
+ */
+export interface CombatEvent { type: 'dmg' | 'heal' | 'monsterDmg' | 'kill' | 'drop' | 'down'; value: number; who?: string; item?: string; time: number; source: 'main' | 'lab'; crit?: boolean; boss?: boolean; target?: string; from?: string; atkStyle?: AtkStyle }
 
 /** 同一回合内相邻出手事件的演出间隔（ms）——UI 只播放 time 已到的事件，形成依次出手的节奏 */
 export const SEQ_MS = 220
 
+/**
+ * 群攻对**每个目标**的伤害系数（v1.28）。
+ *
+ * 这是用户明确要求的那条平衡线——"群攻肯定就比单体的攻击要低"：
+ * 打 1 个只剩 55%（亏 45%）、打 2 个 110%（基本持平）、打 3 个 165%、打满 6 个 330%。
+ * 于是"上群攻还是上单体"变成一道**看敌方人数作答的题**，而不是谁数值高上谁：
+ * 前期 1~2 人的关卡带群攻是纯亏，70 关以后 5~6 人则是压倒性划算。
+ * 敌方群攻走同一个系数，所以双方对称。
+ */
+const AOE_TARGET_RATIO = 0.55
+
+/** 单体治疗量 = atk × 此系数（沿用 v1 起的原值，未改） */
+const HEAL_RATIO = 1.5
+
+/**
+ * `control`（控制减益）的压制效果：**命中即给目标挂上攻/防双减益**。
+ *
+ * 为什么要给它一个真机制（v1.28.7）：`control` 的数值系数 `{0.85,0.9,0.95}` **全面低于**
+ * `melee` 的 `{1.1,1.0,1.0}`，而它唯一的补偿——越过前排直击后排——已被玩家要求取消。
+ * 于是它一度只是"数值更低的近战"，连定位名「控制减益」都名不副实。这个效果把名字兑现了。
+ *
+ * 数值怎么定的：
+ * - **减防御对输出的提升其实很微弱**，别被名字骗了：我方伤害公式是 `atk - 敌def × 0.6`，
+ *   防御本来就只吃六折、且数值远小于攻击。敌 def 100 / 我 atk 500 时，减防 25% 只让伤害
+ *   从 440 涨到 449（**+2%**）。真正有分量的是**减攻击**：敌方输出直接少 20%，
+ *   等于我方全队承伤少两成。所以这一版的重心在 atkPct，defPct 更大只是为了让"破防"看得见。
+ * - `rounds: 2` 是"施加当回合剩下的时间 + 之后的 1 个完整回合"（回合末统一递减，见 fightRound）。
+ *   不取更长是因为它**每次命中都会刷新**：只要 control 活着一直打同一个目标，压制就不会断。
+ *
+ * **不叠加、只取最高档**（与阵营羁绊同一条思路）：多个 `control` 打同一个目标时取各分项的最大值
+ * 并刷新剩余回合，而不是把 20% 叠成 40% —— 叠加会让"带 3 个 control"变成唯一解。
+ *
+ * **敌我同规则**：敌方 `control`（主线 80 关 / 天梯塔 35 层起出现在后排）同样会压制我方队员，
+ * 这份效果对玩家的价值才站得住 —— 与 v1.28.3/v1.28.7 两次"两边必须一样"的教训一脉相承。
+ */
+const CONTROL_DEBUFF = { atkPct: 20, defPct: 25, rounds: 2 }
+
+/** 施加/刷新一次压制：**只取最高档、不叠加**，同时把持续时间刷满 */
+function applyControlDebuff(slot: { debuff?: ControlDebuff }) {
+  const cur = slot.debuff
+  slot.debuff = {
+    atkPct: Math.max(cur?.atkPct ?? 0, CONTROL_DEBUFF.atkPct),
+    defPct: Math.max(cur?.defPct ?? 0, CONTROL_DEBUFF.defPct),
+    left: CONTROL_DEBUFF.rounds,
+  }
+}
+
+/**
+ * 敌方医师的单体治疗量 = 它的 atk × 此系数。
+ *
+ * 敌方医师是 30 关起才出现的兵种，作用是拉长战斗：它会把残血的前排坦克一直抬回来，
+ * 玩家得靠足够的输出把前排连人带奶一起推平。**任何定位都够不到它**——
+ * 它站在后排，而后排在前排被拆完之前是不可攻击的（v1.28.7 起无例外，见 pickTargets）。
+ *
+ * **防僵持**（两条，缺一不可）：
+ * 1. 敌方医师**永不治疗自己**（见 fightRound）——"两个医师互相刷血"这种死循环构造不出来；
+ * 2. 治疗量按本波战斗回合数衰减（下式），久战不下的医师会自己力竭。
+ *    没有第 2 条时，"我方输出 ≤ 敌方治疗量"的阵容会永久卡住，而这条不依赖任何数值假设。
+ */
+const ENEMY_HEAL_RATIO = 1.2
+
+/** 敌方治疗量的衰减速度：每打满这么多回合，治疗量减半一次 */
+const ENEMY_HEAL_DECAY_ROUNDS = 25
+
+/**
+ * 群疗对**每个目标**的回血量系数。
+ * 2 人时总量与单体持平，人越多越划算（6 人时总量是单体的 2.7 倍）；
+ * 代价是单点急救只有单体医师的 46% —— 对面是单点集火时，群疗救不下人。
+ */
+const HEAL_AOE_RATIO = 0.75
+
+/** 战斗回合里我方角色的属性：主线（charStats × 商城增益）与天梯塔（labFighterStats × 祝福）都归一到这个形状 */
+interface FighterStats { atk: number; def: number; hp: number; critRate: number; critDmg: number }
+
+/** fightRound 的调用参数：把主线与天梯塔的差异（属性来源、祝福效果、清波后的推进方式）全部外置 */
+interface FightRoundCfg {
+  /** 当前这一波的战斗快照。`rounds` / `fighterDebuff` 会被本回合**写回**（前者给敌方治疗量衰减用），故不是只读视图 */
+  b: { enemies: EnemyUnit[]; fighterHp: Record<string, number>; rounds?: number; fighterDebuff?: Record<string, ControlDebuff> }
+  source: 'main' | 'lab'
+  statsOf: (id: string) => FighterStats | null
+  /** 无视敌人防御的比例（0~1），来自塔的「破甲式」祝福 */
+  pierce: number
+  /** 整轮闪避概率（0~100），来自塔的「疾风步」祝福 */
+  dodge: number
+  /** 造成伤害的吸血比例（0~100），来自塔的「噬血大法」祝福 */
+  lifesteal: number
+  /** 当前这一波是不是首领（决定击杀事件的演出强度） */
+  isBoss: boolean
+  /** 击杀事件的显示名：主线是怪物名，塔是「第 N 层」 */
+  waveLabel: () => string
+  /** 一波敌人清空：结算奖励并刷新下一波。返回 false 表示战斗已结束，不要再继续 */
+  onWaveClear: () => boolean
+}
+
 export interface LabBattleState {
   floor: number
-  monsterHp: number
+  enemies: EnemyUnit[]
   roundTimer: number
   fighterHp: Record<string, number>
+  /** 见 BattleState.rounds */
+  rounds?: number
+  /** 见 BattleState.fighterDebuff */
+  fighterDebuff?: Record<string, ControlDebuff>
 }
 
 export interface LabState {
@@ -104,7 +240,17 @@ const GIFTS: { id: string; label: string; grant: (inv: Record<string, number>) =
     label: '缘分丹 ×20',
     grant: inv => { inv.yuanfen = num(inv.yuanfen) + 20 },
   },
+  {
+    // 全服十连福利：recruit 的 cost === times，所以 10 连正好 10 颗缘分丹，无折扣。
+    // id 故意不用 `yuanfenNN_` 前缀，免得跟上面那条只是数字不同、哪天手滑敲错就变成"重发一次"。
+    id: 'shilian10_20260915',
+    label: '缘分丹 ×10（十连抽福利）',
+    grant: inv => { inv.yuanfen = num(inv.yuanfen) + 10 },
+  },
 ]
+
+/** 服务端奖励清单的复查间隔（见 syncRemoteRewards）。跟云备份的 3 分钟对齐，别给服务器添没必要的心跳 */
+const REMOTE_REWARD_POLL_MS = 3 * 60 * 1000
 
 /** 数值兜底：缺失/非数字（存档被改坏）一律当 0，避免 NaN 顺着存档扩散 */
 function num(v: unknown): number {
@@ -117,7 +263,7 @@ function freshState(): GameState {
   for (const id of STARTER_IDS) roster[id] = { level: 1, xp: 0, stars: 0, equip: {} }
   return {
     roster,
-    team: { front: ['yellow_disciple', 'yellow_mercenary', null], back: ['yellow_bandit', 'yellow_hunter'] },
+    team: { front: ['yellow_disciple', 'yellow_mercenary', null], back: ['yellow_bandit', 'yellow_hunter', null] },
     equippedFire: null,
     inventory: { coin: 200, yuanfen: 5, crystal: 0, herb: 0, essence: 0, daoling: 0 },
     battle: null,
@@ -153,8 +299,8 @@ function freshState(): GameState {
  */
 function charStatsRaw(entry: RosterEntry, charDef: CharacterDef, fireId: string | null) {
   const lv = entry.level
-  // 星级线性加成 × 境界乘法加成（后者是对抗怪物指数成长的关键，见 data.ts REALM_POWER）
-  const starMult = 1 + entry.stars * 0.08
+  // 星级线性加成（×1.08/星）+ 每满 10 星的品质跃升 + 境界乘法加成（后者是对抗怪物指数成长的关键，见 data.ts REALM_POWER）
+  const starMult = starMultOf(entry.stars)
   const rMult = realmMult(lv)
   let atk = (charDef.baseAtk + charDef.atkGrowth * lv) * starMult * rMult
   let def = (charDef.baseDef + charDef.defGrowth * lv) * starMult * rMult
@@ -188,6 +334,39 @@ function charStatsRaw(entry: RosterEntry, charDef: CharacterDef, fireId: string 
 export function charStats(entry: RosterEntry, charDef: CharacterDef, fireId: string | null) {
   const s = charStatsRaw(entry, charDef, fireId)
   return { atk: Math.round(s.atk), def: Math.round(s.def), hp: Math.round(s.hp), critRate: s.critRate, critDmg: s.critDmg }
+}
+
+/**
+ * 角色"出手会打出什么"的结构化数值（v1.31，见 `game.combatEffectOf`）。
+ * 三种有数字的效果（治疗 / 群疗 / 群攻）+ 压制（它是攻防双减益，不是一个伤害数字，所以形状不同）。
+ */
+export type CombatEffect =
+  | { kind: 'heal' | 'heal_aoe' | 'aoe'; value: number }
+  | { kind: 'control'; atkPct: number; defPct: number; rounds: number }
+
+/**
+ * 按攻击力与定位算效果数值 —— **实战与界面共用这一处**。
+ * 结缘页给未拥有的角色看"初始效果"也走这里（`baseCombatEffectOf`），
+ * 免得"展示时乘 1.5、战斗时乘 1.5"变成两份各写一遍的实现。
+ */
+function effectFor(atk: number, role: Role): CombatEffect | null {
+  switch (role) {
+    // 单奶：回血线最低的那位；群疗：每人回单体量的一半左右（HEAL_AOE_RATIO）
+    case 'heal': return { kind: 'heal', value: Math.round(atk * HEAL_RATIO) }
+    case 'heal_aoe': return { kind: 'heal_aoe', value: Math.round(atk * HEAL_AOE_RATIO) }
+    // 群攻：对**每个**目标的伤害基数（实际还要减目标防御并带 ±15% 浮动，界面须标注）
+    case 'aoe': return { kind: 'aoe', value: Math.round(atk * AOE_TARGET_RATIO) }
+    case 'control': return {
+      kind: 'control',
+      atkPct: CONTROL_DEBUFF.atkPct, defPct: CONTROL_DEBUFF.defPct, rounds: CONTROL_DEBUFF.rounds,
+    }
+    default: return null
+  }
+}
+
+/** 未拥有角色的初始效果（结缘页那排"初始属性"用的就是 def() 里的 base 值） */
+export function baseCombatEffectOf(c: CharacterDef): CombatEffect | null {
+  return effectFor(c.baseAtk, c.role)
 }
 
 /**
@@ -240,6 +419,12 @@ class GameStore {
   private listeners = new Set<() => void>()
   private saveSuspended = false // 恢复云存档时挂起本地保存，避免 reload 的 beforeunload/定时 save 覆盖刚写入的存档
   private justGranted: string[] = [] // 本次加载刚发放的一次性物品（只用于启动提示，不写进存档）
+  /**
+   * 本次启动是不是全新账号（load 两份存档都没读出来、落在 freshState 上）。
+   * 服务端奖励靠它决定"新号发不发"：奖励是补偿性质时新号只登记不发放。
+   * 用运行时标记而不是存档字段——存档结构是红线，能不加字段就不加。
+   */
+  private newAccount = false
 
   constructor() {
     this.state = this.load()
@@ -249,6 +434,9 @@ class GameStore {
     setInterval(() => this.tick(), 100)
     setInterval(() => this.save(), 2000)
     window.addEventListener('beforeunload', () => this.save())
+    // 服务端奖励：启动拉一次，之后定期再拉——运营改完文件，在线玩的人不用刷新也能等到
+    this.syncRemoteRewards()
+    setInterval(() => this.syncRemoteRewards(), REMOTE_REWARD_POLL_MS)
   }
 
   private load(): GameState {
@@ -261,6 +449,7 @@ class GameStore {
         if (migrated) return migrated
       } catch { /* 这份存档损坏，尝试下一份 */ }
     }
+    this.newAccount = true
     return freshState()
   }
 
@@ -282,21 +471,54 @@ class GameStore {
       roster[id] = {
         level: Number.isFinite(e.level as number) ? (e.level as number) : 1,
         xp: Number.isFinite(e.xp as number) ? (e.xp as number) : 0,
-        stars: Number.isFinite(e.stars as number) ? (e.stars as number) : 0,
+        // 星级 clamp 到 [0, MAX_STARS]：畸形档里的 1e9 星会让 starMultOf 打出天文数字属性
+        stars: Number.isFinite(e.stars as number)
+          ? Math.max(0, Math.min(MAX_STARS, Math.floor(e.stars as number)))
+          : 0,
         equip: sanitizeEquipMap(e.equip),
       }
     }
     // 空名册会导致无法出战的软锁，兜底塞回一个初始角色
     if (Object.keys(roster).length === 0) roster.yellow_disciple = { ...base.roster.yellow_disciple }
 
-    const team = (parsed.team && Array.isArray(parsed.team.front) && Array.isArray(parsed.team.back))
-      ? { front: parsed.team.front.slice(0, 3), back: parsed.team.back.slice(0, 2) }
-      : base.team
+    // 阵容迁移（v1.28：5 格 → 6 格）
+    // 老档是 front 3 + back 2，补一个后排空位即可，玩家原有的站位与顺序原样保留（顺序 = 承伤优先级）。
+    //
+    // 同时**剔除不在名册里的陈旧 id**：这类 id 不进战斗，却会让 activeFighters() 返回非空，
+    // 于是 startBattle 放行、而 fighterHp 里根本没有它 ⇒ 开局就判「全员阵亡」。
+    // 放生/改名留下的遗留 id 会踩到这个坑，读档时一次性清干净。
+    const rawTeam = (parsed.team && Array.isArray(parsed.team.front) && Array.isArray(parsed.team.back))
+      ? parsed.team : base.team
+    const readRow = (arr: unknown[], size: number): TeamSlot[] => {
+      const out: TeamSlot[] = []
+      for (let i = 0; i < size; i++) {
+        const v = arr[i]
+        out.push(typeof v === 'string' && roster[v] ? v : null)
+      }
+      return out
+    }
+    const team = { front: readRow(rawTeam.front, TEAM_FRONT_SIZE), back: readRow(rawTeam.back, TEAM_BACK_SIZE) }
+    // 同一角色不能占用两个位置（setSlot 有这道保护，读档也得有：手改存档或旧版本可能留下重复，
+    // 重复 id 会让 fighterHp 只存一份血、却被算作两次出手）
+    const seated = new Set<string>()
+    for (const row of ['front', 'back'] as const) {
+      for (let i = 0; i < team[row].length; i++) {
+        const v = team[row][i]
+        if (!v) continue
+        if (seated.has(v)) team[row][i] = null
+        else seated.add(v)
+      }
+    }
     const highestStage = Number.isFinite(parsed.highestStage as number) ? (parsed.highestStage as number)
       : (Number.isFinite(parsed.stage as number) ? (parsed.stage as number) : base.highestStage)
 
     // 一次性发放：领过的（含 freshState 预置标记）直接跳过；发完把 label 记下来，启动时提示一次
     const inventory = { ...base.inventory, ...(parsed.inventory ?? {}) }
+    // 角色碎片改名并通用化（v1.25）：圣阶角色碎片 → 角色碎片。**数值原样搬过去**，
+    // 玩家攒的碎片不能在改名时蒸发；旧键必须显式删掉，否则上面那句 `...parsed.inventory`
+    // 会把它一直带着，存档里永远留着一个没人读的幽灵字段。
+    if (num(inventory.shard_sheng) > 0) inventory.shard = num(inventory.shard) + num(inventory.shard_sheng)
+    delete inventory.shard_sheng
     const gifts: Record<string, number> = { ...(parsed.gifts as Record<string, number> | undefined) }
     for (const g of GIFTS) {
       if (gifts[g.id] !== undefined) continue
@@ -348,6 +570,46 @@ class GameStore {
 
   /** 挂起本地保存：恢复云存档前调用，防止 reload 时 beforeunload 的 save 把旧内存态写回覆盖 */
   suspendSave() { this.saveSuspended = true }
+
+  /**
+   * 拉取并结算服务端奖励清单（见 rewards.ts）。运营加福利只需改 rewards.json，
+   * 不用改代码/构建/部署；清单拉不到（404、离线、JSON 坏了）就当没有奖励，绝不影响游戏本身。
+   */
+  async syncRemoteRewards(): Promise<void> {
+    try {
+      this.grantRemote(await fetchRemoteRewards())
+    } catch { /* 拉不到就算了，等下一次轮询 */ }
+  }
+
+  /**
+   * 结算一批奖励。幂等键是 state.gifts（与内置 GIFTS 共用同一张表，随存档与云备份走）：
+   * 领过的直接跳过，所以清单里留着老条目是安全的，运营不必手工清理。
+   */
+  private grantRemote(list: RemoteReward[]): void {
+    if (list.length === 0) return
+    const gifts = { ...(this.state.gifts ?? {}) }
+    const inventory = { ...this.state.inventory }
+    const labels: string[] = []
+    const now = Date.now()
+    let touched = false
+    for (const r of list) {
+      if (gifts[r.id] !== undefined) continue
+      if (r.expiresAt > 0 && now > r.expiresAt) continue // 过期就不发，也不登记——活动重开时还能再发
+      // 新号遇上"补偿老玩家"性质的奖励：只登记不发放。标 0 而不是时间戳，跟 freshState 对内置
+      // GIFTS 的预置标记同一个写法，存档里一眼能看出是"压根没发过"而非"某时刻领过"。
+      if (this.newAccount && !r.newPlayersToo) { gifts[r.id] = 0; touched = true; continue }
+      for (const k of Object.keys(r.items)) inventory[k] = num(inventory[k]) + r.items[k]
+      gifts[r.id] = now
+      labels.push(r.label)
+      touched = true
+    }
+    if (!touched) return
+    this.state.gifts = gifts
+    this.state.inventory = inventory
+    this.save() // 立刻落盘：到账要尽快随云备份上传，别等 2 秒定时器（关页面就走不到那一步）
+    this.emit()
+    if (labels.length) this.setNotice(`礼包到账：${labels.join('、')}`)
+  }
 
   save() {
     if (this.saveSuspended) return
@@ -495,6 +757,9 @@ class GameStore {
   // ── 阵容 ───────────────────────────────────────────────────────────────
   setSlot(row: 'front' | 'back', index: number, charId: string | null) {
     if (charId && !this.state.roster[charId]) return
+    // 越界保护：UI 传错 index 时静默丢弃，绝不让 team 数组长出空洞
+    // （空洞里的 undefined 会绕过 `!!x` 之外的判断，让 activeFighters 与实际血条对不上）
+    if (index < 0 || index >= this.state.team[row].length) return
     // 同一角色不能同时占用两个位置
     if (charId) {
       for (const r of ['front', 'back'] as const) {
@@ -503,6 +768,47 @@ class GameStore {
     }
     this.state.team[row][index] = charId
     this.emit()
+  }
+
+  /**
+   * 交换两个阵位上的角色（拖拽换位用）。
+   *
+   * **不复用两次 `setSlot`**：那样中间必然经过"两人都已下阵"的一帧，而 `setSlot` 每次都 emit ——
+   * 自动战斗/战斗页正好在那一帧读阵容，看到的就是残缺阵型。这里先取出两人再写回，只 emit 一次。
+   */
+  swapSlots(a: TeamSlotPos, b: TeamSlotPos) {
+    const ta = this.state.team[a.row], tb = this.state.team[b.row]
+    if (a.index < 0 || a.index >= ta.length) return
+    if (b.index < 0 || b.index >= tb.length) return
+    const va = ta[a.index], vb = tb[b.index]
+    ta[a.index] = vb
+    tb[b.index] = va
+    this.emit()
+  }
+
+  /**
+   * 把战力最高的**未上阵**角色依次填进空位（玩家点「一键补满空位」时才调用），返回补了几人。
+   *
+   * 刻意**不动已经在阵上的位置** —— 这是"补位"不是"重排"：玩家精心凑的阵营羁绊如果被一键打散，
+   * 那这个按钮就成了陷阱。想换人仍然得自己换。
+   */
+  fillEmptySlots(): number {
+    const used = new Set(this.activeFighters())
+    const pool = Object.keys(this.state.roster)
+      .filter(id => !used.has(id) && CHAR_MAP[id])
+      .sort((a, b) => this.powerOf(b) - this.powerOf(a))
+    let filled = 0
+    for (const row of ['front', 'back'] as const) {
+      const slots = this.state.team[row]
+      for (let i = 0; i < slots.length; i++) {
+        // 已占位的格子直接跳过（不覆盖），池子空了也停
+        if (slots[i] || filled >= pool.length) continue
+        slots[i] = pool[filled++]
+      }
+    }
+    if (filled > 0) this.setNotice(`已补入 ${filled} 名武魂`)
+    this.emit()
+    return filled
   }
 
   equipFire(fireId: string | null) {
@@ -547,11 +853,10 @@ class GameStore {
     if (fighters.length === 0) { this.setNotice('请先编排阵容'); return }
     const fighterHp: Record<string, number> = {}
     for (const id of fighters) {
-      const entry = this.state.roster[id]
-      const cdef = CHAR_MAP[id]
-      if (entry && cdef) fighterHp[id] = charStats(entry, cdef, this.fireIdOf(id)).hp
+      const s = this.mainFighterStats(id)
+      if (s) fighterHp[id] = s.hp
     }
-    this.state.battle = { monsterHp: stageStats(this.fightStage()).hp, roundTimer: ROUND_SEC, fighterHp }
+    this.state.battle = { enemies: enemyUnitsForStage(this.fightStage()), roundTimer: ROUND_SEC, fighterHp, rounds: 0, fighterDebuff: {} }
     this.emit()
   }
 
@@ -567,94 +872,379 @@ class GameStore {
     this.emit()
   }
 
-  private frontAlive(b: BattleState): string | null {
-    return this.state.team.front.find(id => id && (b.fighterHp[id] ?? 0) > 0) ?? null
-  }
-  private backAlive(b: BattleState): string | null {
-    return this.state.team.back.find(id => id && (b.fighterHp[id] ?? 0) > 0) ?? null
-  }
+  // 目标选择已抽到 pickFighters（主线与天梯塔共用），此处不再维护两份 frontAlive/backAlive
   private anyAlive(b: BattleState): boolean {
     return Object.values(b.fighterHp).some(hp => hp > 0)
+  }
+
+  /**
+   * 场上是否还有「能打怪的人」——活着的、且不是治疗的角色。
+   *
+   * 治疗角色每轮只加血、不扣怪物血（见 battleRound / labBattleRound 的治疗分支）。
+   * 所以**当活人全是治疗时，就没有任何人扣怪物血**：单治疗打到只剩自己、或双治疗互奶，
+   * 怪物血量恒定不变；而治疗血厚防高（ROLE_MULT.heal: hp 1.1 / def 0.8）又能自疗，
+   * 怪物那点伤害被 `Math.max(0, …)` 夹到 0~1 后打不死它 ⇒ 两边僵持，**战斗永不结束**。
+   * 自动出战挂机时这就是永久卡住（玩家报的「战斗会卡住，剩最后一个人的时候」）。
+   *
+   * 因此治疗分支拿它当闸门：没人可打怪时不再自疗，转为自己出手。
+   * 由此成立的不变量：**只要场上还有活人，本轮至少会有一次对怪物的伤害结算**
+   * （非治疗角色必然走伤害分支；活人全是治疗时它们也全部走伤害分支）⇒ 战斗必然收敛。
+   */
+  private hasAliveAttacker(b: { fighterHp: Record<string, number> }): boolean {
+    return this.activeFighters().some(id =>
+      (b.fighterHp[id] ?? 0) > 0 && !this.isHealer(id))
+  }
+
+  /** 该角色是不是治疗（单体医师与群疗都算）。判据走职责而非 role 字面，新增治疗类 role 时不会漏 */
+  private isHealer(id: string): boolean {
+    const cdef = CHAR_MAP[id]
+    return !!cdef && DUTY_OF_ROLE[cdef.role] === 'healer'
+  }
+
+  // ─ 目标选择（v1.28 策略核心）────────────────────────────────────────────
+  /**
+   * 我方角色的出手目标。
+   *
+   * **一律先打前排，没有任何例外**（v1.28.7 起）：
+   * - **坦克 / 近战 / 控制**：打敌方**前排**最靠前的存活者——想碰到后排，就得先把墙拆了
+   * - **单体法术（single）**：同样只打前排，但挑其中**血最少的**补刀
+   * - **群攻（aoe）**：打敌方**前排全部**存活者，每目标伤害只有单体的 AOE_TARGET_RATIO 倍
+   *
+   * 「一律先打前排」是基本盘，**7 种定位无一例外**：敌方坦克与后排的价值全建立在这条之上——
+   * 如果有一类输出能随手够到后排，摆坦克就没有意义，"布阵"也就无从谈起。
+   * 群攻曾经是第一个出口（打全体），`control` 是第二个（越前排）——两扇门现在都关上了：
+   * 玩家把脆皮放后排、坦克放前排，敌方就再也扫不到、偷不到后排，站位真正算数。
+   *
+   * ⚠️ `control` 的越前排特权已于 v1.28.7 按玩家要求取消（此前是"唯一例外"，只给我方）。
+   * 代价要知道：`control` 的数值系数是 `{0.85, 0.9, 0.95}`，全面低于 `melee` 的 `{1.1, 1.0, 1.0}`，
+   * 那条特权原本是它唯一的补偿。现在它的**目标选择与近战完全相同**，只剩数值更低这一条差别
+   * ⇒ 5 名 control 角色（云山 / 萧战 / 云天河 / 魂天帝 / 风闲）实质上是"更弱的近战"。
+   * 要么给它们数值/效果上的补偿，要么让 `control` 这个定位名有对应的实际机制，二者都还没有做。
+   *
+   * 连带影响：敌方后排医师（30 关起）**不再有任何手段可以提前点掉**，只能等前排被拆完。
+   * 它不会造成僵持——敌方治疗量随回合衰减（见 ENEMY_HEAL_RATIO / ENEMY_HEAL_DECAY_ROUNDS），
+   * 而且它**永不治疗自己**——但带医师的波次会明显变长。
+   */
+  private pickTargets(role: Role, enemies: EnemyUnit[]): EnemyUnit[] {
+    const alive = enemies.filter(e => e.hp > 0)
+    if (alive.length === 0) return []
+    const front = alive.filter(e => e.position === 'front')
+    const back = alive.filter(e => e.position === 'back')
+    // 前排还在就只打前排，拆完墙才轮到后排——7 种定位共用这一句，没有例外
+    const pool = front.length > 0 ? front : back
+    if (role === 'aoe') return pool
+    if (role === 'single') return [pool.reduce((a, b) => (b.hp < a.hp ? b : a))]
+    return [pool[0]]
+  }
+
+  /**
+   * 敌方单位的出手目标——返回**我方队员 id** 列表。
+   *
+   * 规则与我方 `pickTargets` **完全相同**：任何定位都先打前排，前排全灭才轮到后排。
+   * 两边共用同一条规则，"布阵有意义"这句话对敌我双方都成立：我方摆前排替后排挡刀，
+   * 敌方的后排同样被它的前排挡着，谁都不能绕过去。
+   *
+   * 敌方 `control` 的越前排特权在 v1.28.3 就已收回（那时我方还留着，是刻意的单向不对称），
+   * v1.28.7 我方那份也取消了 —— 现在**不再有"哪一侧能越前排"这个问题**。
+   *
+   * 保留这段历史是因为它值得记：当时敌方 `control`（80+ 深度出现在后排）能直击我方后排，
+   * 而"80+ 深度"在两条路径上的到达门槛完全不同 —— 主线要第 80 关，天梯塔**35 层**就到了
+   * （`floorToStageDepth(35) = 80`）。同一条规则在两边表现不一致：玩家在塔里看到
+   * "前排还站着、后排却在掉血"，回头打主线又一切正常，只能得出"你两边是不是写了不同的战斗"。
+   * 既然现在两边都没有特权，这类"同一个规则、不同时机解锁"造成的观感差也就无从产生了。
+   */
+  private pickFighters(role: Role, b: { fighterHp: Record<string, number> }): string[] {
+    const row = (r: 'front' | 'back') =>
+      this.state.team[r].filter((id): id is string => !!id && (b.fighterHp[id] ?? 0) > 0)
+    const front = row('front')
+    const back = row('back')
+    // 前排还在就只打前排 —— 与我方 pickTargets 是同一句话，两边都不许越位
+    const pool = front.length > 0 ? front : back
+    if (role === 'aoe') return pool
+    if (role === 'single') {
+      const t = pool.reduce((a, c) => ((b.fighterHp[c] ?? 0) < (b.fighterHp[a] ?? 0) ? c : a))
+      return [t]
+    }
+    const t = pool[0]
+    return t ? [t] : []
+  }
+
+  /**
+   * 治疗目标（我方）。
+   * - `heal`（单体医师）→ 血**百分比**最低的那个。按百分比而非绝对值：坦克血厚，
+   *   按绝对值算的话医师会永远在奶坦克，后排脆皮被切死时一口奶都吃不到。
+   * - `heal_aoe`（群疗）→ 全体存活队员，但每人只回单体治疗量的一半左右（见 HEAL_AOE_RATIO）。
+   */
+  private pickHealTargets(
+    role: Role,
+    b: { fighterHp: Record<string, number> },
+    statsOf: (id: string) => FighterStats | null,
+  ): string[] {
+    const alive = this.activeFighters().filter(id => (b.fighterHp[id] ?? 0) > 0)
+    if (alive.length === 0) return []
+    if (role === 'heal_aoe') return alive
+    let lowestId: string | null = null
+    let lowestPct = Infinity
+    for (const id of alive) {
+      const s = statsOf(id)
+      if (!s || s.hp <= 0) continue
+      const pct = (b.fighterHp[id] ?? 0) / s.hp
+      if (pct < lowestPct) { lowestPct = pct; lowestId = id }
+    }
+    return lowestId ? [lowestId] : []
+  }
+
+  /**
+   * 一个战斗回合——主线与天梯塔**共用**（v1.28 抽出）。
+   *
+   * 抽出前这两处是逐字重复的两份代码：治疗分支、伤害结算、怪物反击、团灭判定各写一遍，
+   * 每次改动都得记着改两处（v1.25.2 修「战斗卡住」时就是这么小心翼翼过来的）。
+   * 多单位战斗把复杂度推高了一档，再复制一份必然发散，所以在此统一。
+   *
+   * 出手顺序：我方全员依次出手 → 敌方全体依次反击。演出上每个事件按 SEQ_MS 错开，
+   * UI 只播放 time 已到的事件，于是形成"依次出手"而非全员同帧。
+   *
+   * **压制（`control` 的攻/防双减益，v1.28.7）**在这里统一进出：出手时对命中的敌方目标施加/刷新，
+   * 结算时把双方身上的压制折进攻防（见 CONTROL_DEBUFF），回合末递减。不在
+   * `mainFighterStats`/`labFighterStats` 里做，是因为那两个函数拿不到当前这波的 `b`。
+   */
+  private fightRound(cfg: FightRoundCfg): void {
+    const { b, source, onWaveClear } = cfg
+    const t0 = Date.now()
+    let seq = 0
+    const at = () => t0 + seq * SEQ_MS
+
+    // 受压制的队员：攻/防按百分点下调。**折在这里而不是改 statsOf 的返回值**——
+    // 那两个函数每次调用都新建对象且被 UI 复用，改返回值会污染战斗外的显示。
+    const statsOf = (id: string): FighterStats | null => {
+      const s = cfg.statsOf(id)
+      if (!s) return null
+      const d = b.fighterDebuff?.[id]
+      if (!d) return s
+      return { ...s, atk: s.atk * (1 - d.atkPct / 100), def: s.def * (1 - d.defPct / 100) }
+    }
+    // 受压制的敌人：只有攻击要下调（防御在下面伤害公式里就地折算）
+    const enemyAtk = (e: EnemyUnit) => e.atk * (1 - (e.debuff?.atkPct ?? 0) / 100)
+
+    // ── 我方行动 ──
+    for (const id of this.activeFighters()) {
+      if ((b.fighterHp[id] ?? 0) <= 0) continue
+      const cdef = CHAR_MAP[id]
+      const stats = statsOf(id)
+      if (!cdef || !stats) continue
+      const role = cdef.role
+
+      // 治疗：单体医师奶血线最低的，群疗奶全场。
+      // 闸门（v1.25.2）：只有场上还有「能打怪的人」时才值得加血——活人全是治疗时若继续自疗，
+      // 就没人扣敌人血了 ⇒ 死循环。此时不 continue，落下去按普通出手打敌人。
+      if (this.isHealer(id) && this.hasAliveAttacker(b)) {
+        const targets = this.pickHealTargets(role, b, statsOf)
+        if (targets.length > 0) {
+          const per = Math.round(stats.atk * (role === 'heal_aoe' ? HEAL_AOE_RATIO : HEAL_RATIO))
+          const tHeal = at()
+          for (const tid of targets) {
+            const fs = statsOf(tid)
+            if (!fs) continue
+            b.fighterHp[tid] = Math.min(fs.hp, (b.fighterHp[tid] ?? 0) + per)
+            this.state.combatEvents.push({ type: 'heal', value: per, who: tid, time: tHeal, source })
+          }
+          // 群疗的多条事件共用同一个时间戳（同帧飘字才是"回了一片"的观感），只占一个出手位
+          seq++
+          continue
+        }
+      }
+
+      const targets = this.pickTargets(role, b.enemies)
+      if (targets.length === 0) continue
+      // 群攻对每个目标的伤害要打折："群攻肯定比单体低"（见 AOE_TARGET_RATIO）
+      const perTarget = role === 'aoe' ? AOE_TARGET_RATIO : 1
+      const tHit = at()
+      for (const e of targets) {
+        // 被压制的敌人防御按百分点下调（"破防"）——注意防御本来就只吃六折且数值远小于攻击，
+        // 这一项对伤害的贡献很小，真正有分量的是它自己打过来时的 atk 下调（见 CONTROL_DEBUFF）
+        const pierceDef = e.def * (1 - (e.debuff?.defPct ?? 0) / 100) * 0.6 * (1 - cfg.pierce)
+        let dmg = Math.max(1, Math.round((stats.atk * perTarget - pierceDef) * (0.85 + Math.random() * 0.3)))
+        const crit = Math.random() * 100 < stats.critRate
+        if (crit) dmg = Math.round(dmg * (1 + stats.critDmg / 100))
+        if (cfg.lifesteal > 0) {
+          b.fighterHp[id] = Math.min(stats.hp, (b.fighterHp[id] ?? 0) + Math.round(dmg * cfg.lifesteal / 100))
+        }
+        e.hp -= dmg
+        this.state.combatEvents.push({ type: 'dmg', value: dmg, who: id, target: e.uid, time: tHit, source, crit })
+        // 控制减益：**活着才挂得上**（打死了就没有"压制"可言），而且每次命中都刷新时长，
+        // 于是"control 一直咬住同一个目标"= 压制不断档，这正是不给它更高数值的交换条件
+        if (role === 'control' && e.hp > 0) applyControlDebuff(e)
+      }
+      seq++
+
+      // 逐角色结算：出手即刻判定，一波敌人清空则后续角色不再出手
+      if (b.enemies.every(e => e.hp <= 0)) {
+        this.state.combatEvents.push({ type: 'kill', value: 0, who: cfg.waveLabel(), time: at(), source, boss: cfg.isBoss })
+        // 这个出口也要递减（原因见 tickDebuffs）—— 先扣再清波，免得带着半截压制进下一波
+        this.tickDebuffs(b)
+        if (!onWaveClear()) return
+        return
+      }
+    }
+
+    // ── 敌方反击：每个存活敌人各出手一次 ──
+    if (cfg.dodge > 0 && Math.random() * 100 < cfg.dodge) return
+
+    const rounds = b.rounds ?? 0
+    const enemyCount = b.enemies.length
+    for (const e of b.enemies) {
+      if (e.hp <= 0) continue
+
+      // 敌方医师先救人、不参与输出。**只治队友、绝不治自己**——这是防僵持的硬约束：
+      // 只要我方集火它，它必然倒下，"两个医师互相刷血"这种死循环根本构造不出来。
+      // 治疗量还随本波回合数衰减，久战不下就自己力竭（见 ENEMY_HEAL_RATIO）。
+      if (DUTY_OF_ROLE[e.role] === 'healer') {
+        const wounded = b.enemies
+          .filter(o => o.hp > 0 && o.uid !== e.uid && o.hp < o.maxHp)
+          .sort((x, y) => x.hp / x.maxHp - y.hp / y.maxHp)[0]
+        if (wounded) {
+          // 敌方医师被压制时**连治疗量一起掉**（它和输出同源于 atk）
+          const heal = Math.round((enemyAtk(e) * ENEMY_HEAL_RATIO) / (1 + rounds / ENEMY_HEAL_DECAY_ROUNDS))
+          wounded.hp = Math.min(wounded.maxHp, wounded.hp + heal)
+          this.state.combatEvents.push({ type: 'heal', value: heal, who: e.uid, target: wounded.uid, time: t0 + seq * SEQ_MS + 120, source })
+          seq++
+          continue
+        }
+      }
+
+      const targets = this.pickFighters(e.role, b)
+      const perTarget = e.role === 'aoe' ? AOE_TARGET_RATIO : 1
+      for (const tid of targets) {
+        const stats = statsOf(tid)
+        if (!stats) continue
+        // 防御减伤按**敌人数**摊薄：多打一时，高防御只能挡住其中一个（见 data.ts 的 ENEMY_SCALE 注释）。
+        // 不摊薄的话高防坦克在多敌人关卡会直接免疫伤害，人越多反而越安全，与"人多更难"完全相反。
+        const defEff = stats.def / enemyCount
+        const mdmg = Math.max(0, Math.round((enemyAtk(e) * perTarget - defEff) * (0.85 + Math.random() * 0.3)))
+        b.fighterHp[tid] = Math.max(0, (b.fighterHp[tid] ?? 0) - mdmg)
+        const tCounter = t0 + seq * SEQ_MS + 120
+        this.state.combatEvents.push({ type: 'monsterDmg', value: mdmg, who: tid, from: e.uid, time: tCounter, source, atkStyle: e.atkStyle })
+        if (b.fighterHp[tid] <= 0) {
+          this.state.combatEvents.push({ type: 'down', value: 0, who: tid, time: tCounter + 200, source })
+        } else if (e.role === 'control') {
+          // 敌方控制减益同样只挂活人。我方队员在清波时**不重建**，所以得存在 map 里自己递减
+          const fd = (b.fighterDebuff ??= {})
+          const slot = { debuff: fd[tid] }
+          applyControlDebuff(slot)
+          fd[tid] = slot.debuff!
+        }
+        seq++
+      }
+    }
+    // 本波回合数 +1：敌方治疗量按它衰减（清波时由 onWaveClear 重置为 0）
+    b.rounds = rounds + 1
+    this.tickDebuffs(b)
+  }
+
+  /**
+   * 回合末递减双方身上的压制、清掉过期的。
+   *
+   * ⚠️ **两个出口都要调**（正常走完 + 我方清空一波提前 return）。只挂在末尾的话，
+   * "每波都是一回合秒掉"的队伍身上那层压制永远不会到期——它们总是在回合末之前就 return 了。
+   * 闪避那条 return 不在此列：那一整轮根本没开打（`b.rounds` 也没 +1），不算一个回合。
+   */
+  private tickDebuffs(b: FightRoundCfg['b']): void {
+    for (const e of b.enemies) {
+      if (e.debuff && --e.debuff.left <= 0) e.debuff = undefined
+    }
+    for (const [id, d] of Object.entries(b.fighterDebuff ?? {})) {
+      if (--d.left <= 0) delete b.fighterDebuff![id]
+    }
+  }
+
+  /**
+   * **战斗口径**属性：主线战斗真正用的那一份 = charStats × 阵营羁绊 × 商城限时增益。
+   *
+   * 界面要回答"这个角色上阵后有多少属性"时必须走这里。`statsOf` 是**裸属性**（不含羁绊）——
+   * v1.28 加阵营羁绊时只改了战斗口径，界面仍显示裸属性，羁绊面板又只写一行"全体攻击 +24%"，
+   * 于是玩家点开角色发现凑齐 6 个云岚宗数字纹丝不动，报成「阵容组合加成没有实际生效」。
+   * 加成其实一直在算（同一角色伤害 335 → 417），坏的是口径：显示 615 / 战斗 763，中间那份从没露过面。
+   * 这与真·数值 bug 的表现**一模一样**，所以唯一的解法是让显示与战斗同源，而不是各算各的。
+   *
+   * starsOverride 与 statsOf 同义：只给升星预览试算，不动存档。
+   */
+  battleStatsOf(charId: string, starsOverride?: number): FighterStats | null {
+    const entry = this.state.roster[charId]
+    const cdef = CHAR_MAP[charId]
+    if (!entry || !cdef) return null
+    const e = starsOverride === undefined ? entry : { ...entry, stars: starsOverride }
+    const s = charStats(e, cdef, this.fireIdOf(charId))
+    // 羁绊只给上阵角色：没上阵的人本来就不在羁绊统计里，给他套一份"全队加成"
+    // 等于凭空造出一个它永远拿不到的数。商城增益是账号级的，上没上阵都照吃。
+    const bo = this.activeFighters().includes(charId) ? this.bondBonuses() : bondBonusesFor([])
+    return {
+      atk: Math.round(s.atk * (1 + bo.atkPct / 100) * this.buffMult('atk')),
+      def: Math.round(s.def * (1 + bo.defPct / 100) * this.buffMult('def')),
+      hp: Math.round(s.hp * (1 + bo.hpPct / 100)),
+      critRate: s.critRate + bo.crit,
+      critDmg: s.critDmg,
+    }
+  }
+
+  /** 主线战斗属性（天梯塔那份见 labFighterStats，两条线都归一到 FighterStats） */
+  private mainFighterStats(id: string): FighterStats | null {
+    return this.battleStatsOf(id)
+  }
+
+  /**
+   * 该角色一次出手打出的**效果数值**（v1.31）。
+   *
+   * 存在的理由与 battleStatsOf 一样：玩家要评估一个角色，光看攻防血是不够的 ——
+   * 医师真正的价值是"每次回多少血"、群攻的实际强度是"每个目标挨多少"、
+   * control 的价值是"压制掉对方多少攻防"。这些数引擎一直在算，只是从没露过面。
+   *
+   * ⚠️ 界面**绝不能自己乘系数**：1.5 / 0.75 / 0.55 是 fightRound 里那几个常量的复述，
+   * 界面各写一遍就等于把"同一件事两份实现"又种回去（v1.21.4、v1.29 两次同源教训）。
+   */
+  combatEffectOf(charId: string): CombatEffect | null {
+    const cdef = CHAR_MAP[charId]
+    const s = this.battleStatsOf(charId)
+    if (!cdef || !s) return null
+    return effectFor(s.atk, cdef.role)
+  }
+
+  /**
+   * 当前上阵阵容激活的阵营羁绊。主线与天梯塔**共用同一套统计**——
+   * 羁绊算的是"谁站在这套阵容里"，与在哪条线打无关，两条线各算一份迟早会对不上。
+   *
+   * 每次调用都重算（6 个 id × 10 个阵营的计数，开销可忽略），不做缓存：
+   * 缓存要为"换阵容/换角色"预留失效点，而漏失效会造出比这点开销大得多的 bug。
+   */
+  bondBonuses(): BondBonuses {
+    return bondBonusesFor([...this.state.team.front, ...this.state.team.back])
   }
 
   private battleRound() {
     const b = this.state.battle
     if (!b) return
     const stage = this.fightStage()
-    const monsterDef = monsterForStage(stage)
-    const monster = stageStats(stage)
-    const atkBuff = this.buffMult('atk')
-    const defBuff = this.buffMult('def')
 
-    // 我方行动：输出角色打怪，治疗角色回复队友
-    // 演出节奏：每个出手事件的 time 依次错开 SEQ_MS，UI 只播放 time 已到的事件，形成"依次出手"而非全员同帧
-    const t0 = Date.now()
-    let seq = 0
-    for (const id of this.activeFighters()) {
-      const hp = b.fighterHp[id] ?? 0
-      if (hp <= 0) continue
-      const cdef = CHAR_MAP[id]
-      const entry = this.state.roster[id]
-      if (!cdef || !entry) continue
-      const stats = charStats(entry, cdef, this.fireIdOf(id))
-      if (cdef.role === 'heal') {
-        let lowestId: string | null = null
-        let lowestPct = 1
-        for (const fid of this.activeFighters()) {
-          const fhp = b.fighterHp[fid] ?? 0
-          if (fhp <= 0) continue
-          const fdef = CHAR_MAP[fid]
-          const fentry = this.state.roster[fid]
-          if (!fdef || !fentry) continue
-          const maxHp = charStats(fentry, fdef, this.fireIdOf(fid)).hp
-          const pct = fhp / maxHp
-          if (pct < lowestPct) { lowestPct = pct; lowestId = fid }
-        }
-        if (lowestId) {
-          const fdef = CHAR_MAP[lowestId]
-          const fentry = this.state.roster[lowestId]
-          const maxHp = fdef && fentry ? charStats(fentry, fdef, this.fireIdOf(lowestId)).hp : 0
-          const heal = Math.round(stats.atk * 1.5)
-          b.fighterHp[lowestId] = Math.min(maxHp, (b.fighterHp[lowestId] ?? 0) + heal)
-          this.state.combatEvents.push({ type: 'heal', value: heal, who: lowestId, time: t0 + seq * SEQ_MS, source: 'main' })
-          seq++
-        }
-        continue
-      }
-      let dmg = Math.max(1, Math.round((stats.atk * atkBuff - monster.def * 0.6) * (0.85 + Math.random() * 0.3)))
-      const crit = Math.random() * 100 < stats.critRate
-      if (crit) dmg = Math.round(dmg * (1 + stats.critDmg / 100))
-      // 逐角色结算：出手即刻扣血并判定，怪物中途倒下则后续角色不再出手
-      b.monsterHp -= dmg
-      this.state.combatEvents.push({ type: 'dmg', value: dmg, who: id, time: t0 + seq * SEQ_MS, source: 'main', crit })
-      seq++
-
-      if (b.monsterHp <= 0) {
-        this.state.combatEvents.push({ type: 'kill', value: 0, who: monsterDef.name, time: t0 + seq * SEQ_MS, source: 'main', boss: isBossStage(stage) })
+    this.fightRound({
+      b,
+      source: 'main',
+      statsOf: id => this.mainFighterStats(id),
+      pierce: 0,
+      dodge: 0,
+      lifesteal: 0,
+      isBoss: isBossStage(stage),
+      waveLabel: () => monsterForStage(this.fightStage()).name,
+      onWaveClear: () => {
         this.onKill()
-        if (!this.state.battle) return
-        b.monsterHp = stageStats(this.fightStage()).hp
-        return
-      }
-    }
+        // onKill 里可能结束整场战斗（例如触发停战），此时不能再刷新敌人
+        if (this.state.battle !== b) return false
+        b.enemies = enemyUnitsForStage(this.fightStage())
+        b.rounds = 0
+        return true
+      },
+    })
 
-    // 怪物反击：优先攻击前排存活者（演出上排在全员出手之后）
-    const targetId = this.frontAlive(b) ?? this.backAlive(b)
-    if (targetId) {
-      const cdef = CHAR_MAP[targetId]
-      const entry = this.state.roster[targetId]
-      if (cdef && entry) {
-        const stats = charStats(entry, cdef, this.fireIdOf(targetId))
-        const mdmg = Math.max(0, Math.round((monster.atk - stats.def * defBuff) * (0.85 + Math.random() * 0.3)))
-        b.fighterHp[targetId] = Math.max(0, (b.fighterHp[targetId] ?? 0) - mdmg)
-        const tCounter = t0 + seq * SEQ_MS + 120
-        this.state.combatEvents.push({ type: 'monsterDmg', value: mdmg, who: targetId, time: tCounter, source: 'main' })
-        if (b.fighterHp[targetId] <= 0) {
-          this.state.combatEvents.push({ type: 'down', value: 0, who: targetId, time: tCounter + 200, source: 'main' })
-        }
-      }
-    }
-
+    // 战斗若已在清波/结算流程里结束，就不必再判团灭（此时 b 已脱离 state）
+    if (this.state.battle !== b) return
     if (!this.anyAlive(b)) {
       if (this.state.farmStage === null) {
         if (this.state.wipeStage === stage) this.state.wipeStreak += 1
@@ -697,7 +1287,7 @@ class GameStore {
     // 刷材料模式：只结算上面的掉落，不推进主线、不发首通奖励（首通奖励仅主线推进时给一次）
     if (farming) return
     // 首通奖励：缘分丹 + 异火里程碑
-    // 缘分丹原先只有初始 5 颗、零产出来源，抽卡开局即死，26 名角色里 18~21 名永久不可得
+    // 缘分丹原先只有初始 5 颗、零产出来源，抽卡开局即死，54 名角色里绝大多数终身不可得
     const isFirstClear = stage >= this.state.highestStage
     if (isFirstClear) {
       if (boss) {
@@ -747,11 +1337,12 @@ class GameStore {
     if (!entry || !cdef) return null
     const base = charStats(entry, cdef, this.fireIdOf(id))
     const bt = this.blessingTotals()
+    const bo = this.bondBonuses()
     return {
-      atk: Math.round(base.atk * (1 + bt.atkPct / 100) * this.buffMult('atk')),
-      def: Math.round(base.def * (1 + bt.defPct / 100) * this.buffMult('def')),
-      hp: Math.round(base.hp * (1 + bt.hpPct / 100)),
-      critRate: base.critRate,
+      atk: Math.round(base.atk * (1 + bt.atkPct / 100) * (1 + bo.atkPct / 100) * this.buffMult('atk')),
+      def: Math.round(base.def * (1 + bt.defPct / 100) * (1 + bo.defPct / 100) * this.buffMult('def')),
+      hp: Math.round(base.hp * (1 + bt.hpPct / 100) * (1 + bo.hpPct / 100)),
+      critRate: base.critRate + bo.crit,
       critDmg: base.critDmg,
     }
   }
@@ -766,7 +1357,7 @@ class GameStore {
       const s = this.labFighterStats(id)
       if (s) fighterHp[id] = s.hp
     }
-    this.state.lab.battle = { floor: 1, monsterHp: labStats(1).hp, roundTimer: ROUND_SEC, fighterHp }
+    this.state.lab.battle = { floor: 1, enemies: enemyUnitsForFloor(1), roundTimer: ROUND_SEC, fighterHp, rounds: 0, fighterDebuff: {} }
     this.emit()
   }
 
@@ -784,12 +1375,6 @@ class GameStore {
     this.emit()
   }
 
-  private labFrontAlive(b: LabBattleState): string | null {
-    return this.state.team.front.find(id => id && (b.fighterHp[id] ?? 0) > 0) ?? null
-  }
-  private labBackAlive(b: LabBattleState): string | null {
-    return this.state.team.back.find(id => id && (b.fighterHp[id] ?? 0) > 0) ?? null
-  }
   private labAnyAlive(b: LabBattleState): boolean {
     return Object.values(b.fighterHp).some(hp => hp > 0)
   }
@@ -798,79 +1383,29 @@ class GameStore {
     const b = this.state.lab.battle
     if (!b) return
     const boss = isLabBoss(b.floor)
-    const monster = labStats(b.floor)
     const bt = this.blessingTotals()
 
-    // 与主线一致的依次出手演出节奏
-    const t0 = Date.now()
-    let seq = 0
-    for (const id of this.activeFighters()) {
-      const hp = b.fighterHp[id] ?? 0
-      if (hp <= 0) continue
-      const cdef = CHAR_MAP[id]
-      if (!cdef) continue
-      const stats = this.labFighterStats(id)
-      if (!stats) continue
-      if (cdef.role === 'heal') {
-        let lowestId: string | null = null
-        let lowestPct = 1
-        for (const fid of this.activeFighters()) {
-          const fhp = b.fighterHp[fid] ?? 0
-          if (fhp <= 0) continue
-          const fs = this.labFighterStats(fid)
-          if (!fs) continue
-          const pct = fhp / fs.hp
-          if (pct < lowestPct) { lowestPct = pct; lowestId = fid }
-        }
-        if (lowestId) {
-          const fs = this.labFighterStats(lowestId)
-          const maxHp = fs ? fs.hp : 0
-          const heal = Math.round(stats.atk * 1.5)
-          b.fighterHp[lowestId] = Math.min(maxHp, (b.fighterHp[lowestId] ?? 0) + heal)
-          this.state.combatEvents.push({ type: 'heal', value: heal, who: lowestId, time: t0 + seq * SEQ_MS, source: 'lab' })
-          seq++
-        }
-        continue
-      }
-      const pierce = Math.min(0.9, bt.pierce / 100)
-      let dmg = Math.max(1, Math.round((stats.atk - monster.def * 0.6 * (1 - pierce)) * (0.85 + Math.random() * 0.3)))
-      const crit = Math.random() * 100 < stats.critRate
-      if (crit) dmg = Math.round(dmg * (1 + stats.critDmg / 100))
-      if (bt.lifesteal > 0) {
-        const fs = this.labFighterStats(id)
-        if (fs) b.fighterHp[id] = Math.min(fs.hp, hp + Math.round(dmg * bt.lifesteal / 100))
-      }
-      // 逐角色结算：出手即刻扣血并判定，怪物中途倒下则后续角色不再出手
-      b.monsterHp -= dmg
-      this.state.combatEvents.push({ type: 'dmg', value: dmg, who: id, time: t0 + seq * SEQ_MS, source: 'lab', crit })
-      seq++
-
-      if (b.monsterHp <= 0) {
-        this.state.combatEvents.push({ type: 'kill', value: 0, who: `第${b.floor}层`, time: t0 + seq * SEQ_MS, source: 'lab', boss })
+    this.fightRound({
+      b,
+      source: 'lab',
+      statsOf: id => this.labFighterStats(id),
+      pierce: Math.min(0.9, bt.pierce / 100),
+      dodge: bt.dodge,
+      lifesteal: bt.lifesteal,
+      isBoss: boss,
+      waveLabel: () => `第${b.floor}层`,
+      onWaveClear: () => {
         this.labOnKill(b, boss)
-        if (!this.state.lab.battle) return
+        // labOnKill 里可能结束整场爬塔（例如领满三选一后撤退），此时不能再刷新下一层
+        if (this.state.lab.battle !== b) return false
         b.floor += 1
-        b.monsterHp = labStats(b.floor).hp
-        return
-      }
-    }
+        b.enemies = enemyUnitsForFloor(b.floor)
+        b.rounds = 0
+        return true
+      },
+    })
 
-    if (bt.dodge > 0 && Math.random() < bt.dodge / 100) return
-
-    const targetId = this.labFrontAlive(b) ?? this.labBackAlive(b)
-    if (targetId) {
-      const stats = this.labFighterStats(targetId)
-      if (stats) {
-        const mdmg = Math.max(0, Math.round((monster.atk - stats.def) * (0.85 + Math.random() * 0.3)))
-        b.fighterHp[targetId] = Math.max(0, (b.fighterHp[targetId] ?? 0) - mdmg)
-        const tCounter = t0 + seq * SEQ_MS + 120
-        this.state.combatEvents.push({ type: 'monsterDmg', value: mdmg, who: targetId, time: tCounter, source: 'lab' })
-        if (b.fighterHp[targetId] <= 0) {
-          this.state.combatEvents.push({ type: 'down', value: 0, who: targetId, time: tCounter + 200, source: 'lab' })
-        }
-      }
-    }
-
+    if (this.state.lab.battle !== b) return
     if (!this.labAnyAlive(b)) {
       this.setNotice(`爬塔失败于第 ${b.floor} 层，祝福清空，重新出发`)
       this.state.lab.battle = null
@@ -1004,23 +1539,39 @@ class GameStore {
     }
   }
 
+  /**
+   * 抽卡。抽到**重复**的角色时按品阶给补偿（v1.25）：
+   * - 准圣 / 圣阶 → 转「角色碎片」（攒得住，有确定出口：兑换未拥有的角色）
+   * - 黄 / 玄 / 地 / 天 → 仍退武魂精血，与 v1.24.2 及之前一致
+   *
+   * 分界不是随手划的：低阶重复量压倒性（终身 75 抽里黄+玄重复 40 次，准圣+圣不到 1 次），
+   * 低阶也给碎片等于让碎片随抽数线性泛滥。见 data.ts 的 DUPE_SHARD 注释。
+   */
   recruit(times: 1 | 10) {
     const cost = times
     if ((this.state.inventory.yuanfen ?? 0) < cost) { this.setNotice('缘分丹不足'); return [] }
     this.state.inventory.yuanfen -= cost
-    const results: { id: string; isNew: boolean; rarity: Rarity; pity: boolean }[] = []
+    const results: { id: string; isNew: boolean; rarity: Rarity; pity: boolean; shard: number; essence: number }[] = []
     for (let i = 0; i < times; i++) {
       const { rarity, pity } = this.rollRarity()
       const pool = CHARACTERS.filter(c => c.rarity === rarity)
       const pick = pool[Math.floor(Math.random() * pool.length)]
       if (!pick) continue
       const isNew = !this.state.roster[pick.id]
+      let shard = 0, essence = 0
       if (isNew) {
         this.state.roster[pick.id] = { level: 1, xp: 0, stars: 0, equip: {} }
       } else {
-        this.state.inventory.essence = (this.state.inventory.essence ?? 0) + ESSENCE_BY_RARITY[rarity]
+        const frag = DUPE_SHARD[rarity]
+        if (frag) {
+          shard = frag
+          this.state.inventory.shard = (this.state.inventory.shard ?? 0) + shard
+        } else {
+          essence = ESSENCE_BY_RARITY[rarity]
+          this.state.inventory.essence = (this.state.inventory.essence ?? 0) + essence
+        }
       }
-      results.push({ id: pick.id, isNew, rarity, pity })
+      results.push({ id: pick.id, isNew, rarity, pity, shard, essence })
     }
     if (results.length > 0) {
       const order = RARITY_INFO
@@ -1094,37 +1645,46 @@ class GameStore {
     }
   }
 
-  // ── 升星 ───────────────────────────────────────────────────────────────
+  // ── 升星（v1.28.9：上限 50★、每 10 星一档品质，定数见 data.STAR_TIERS）────────
   starUp(id: string) {
     const entry = this.state.roster[id]
     const cdef = CHAR_MAP[id]
     if (!entry || !cdef) return
-    if (entry.stars >= MAX_STARS) { this.setNotice('已达最高星级'); return }
+    if (entry.stars >= MAX_STARS) { this.setNotice(`已达最高星级 ${MAX_STARS}★`); return }
     const cost = starUpCost(entry.stars)
     if ((this.state.inventory[cost.item] ?? 0) < cost.amount) {
       this.setNotice(`需要 ${cost.amount} ${itemLabel(cost.item).name}`)
       return
     }
+    const tierBefore = starTierIndex(entry.stars)
     this.state.inventory[cost.item] -= cost.amount
     entry.stars += 1
-    this.setNotice(`${cdef.name} 突破至 ${entry.stars}★`)
+    const tier = starTierOf(entry.stars)
+    // 跨档单独报一次：否则"每 10 星一个品质"这件事在提示里完全看不见
+    this.setNotice(starTierIndex(entry.stars) > tierBefore
+      ? `${cdef.name} 晋入 ${tier.name}！${entry.stars}★`
+      : `${cdef.name} 突破至 ${entry.stars}★（${tier.name}）`)
     this.emit()
   }
 
   /**
-   * 圣阶碎片兑换：30 碎片必得一名未拥有的圣阶角色。
-   * 原先碎片只有掉落、没有任何消耗入口，掉了也没用。
+   * 角色碎片兑换：花 `SHARD_COST[品阶]` 枚碎片，换一名**指定的、尚未拥有**的角色。
+   *
+   * 只换未拥有的是刻意的——重复的角色已经有转化机制了，再允许用碎片换重复角色，
+   * 系统就变成"碎片 → 角色 → 又抽到重复 → 更多碎片"的空转循环。
+   * 代价是集齐 54 名之后碎片失去出口，所以 UI 要在那时明确说明，别让玩家白攒。
    */
-  redeemShengShard() {
-    const need = SHENG_SHARD_COST
-    if ((this.state.inventory.shard_sheng ?? 0) < need) { this.setNotice(`需要 ${need} 枚圣阶角色碎片`); return }
-    const pool = CHARACTERS.filter(c => c.rarity === 'sheng' && !this.state.roster[c.id])
-    if (pool.length === 0) { this.setNotice('圣阶角色已全部集齐'); return }
-    const pick = pool[Math.floor(Math.random() * pool.length)]
-    this.state.inventory.shard_sheng -= need
-    this.state.roster[pick.id] = { level: 1, xp: 0, stars: 0, equip: {} }
-    this.setNotice(`✨ 碎片凝聚成形！获得圣阶「${pick.name}」`)
+  redeemShard(charId: string): { ok: boolean; why?: string } {
+    const cdef = CHAR_MAP[charId]
+    if (!cdef) return { ok: false, why: '没有这名武魂' }
+    if (this.state.roster[charId]) return { ok: false, why: `${cdef.name} 已在名录中` }
+    const need = SHARD_COST[cdef.rarity]
+    if ((this.state.inventory.shard ?? 0) < need) return { ok: false, why: `角色碎片不足（需要 ${need} 枚）` }
+    this.state.inventory.shard -= need
+    this.state.roster[charId] = { level: 1, xp: 0, stars: 0, equip: {} }
+    this.setNotice(`✨ 碎片凝聚成形！获得${RARITY_INFO[cdef.rarity].label}「${cdef.name}」`)
     this.emit()
+    return { ok: true }
   }
 
   // ── 装备：背包（equipBag）与角色已穿戴（roster[id].equip）之间互相移动 ──────────
@@ -1149,15 +1709,52 @@ class GameStore {
     this.emit()
   }
 
-  /** 卖掉背包里用不上的装备换灵金，避免背包被垃圾词条堆满又没有处理手段 */
-  sellEquip(itemId: string) {
-    const idx = this.state.equipBag.findIndex(i => i.id === itemId)
-    if (idx < 0) return
-    const item = this.state.equipBag[idx]
-    const price = { yellow: 20, xuan: 50, di: 120, tian: 300, quasi: 700, sheng: 1800 }[item.quality]
-    this.state.equipBag.splice(idx, 1)
-    this.state.inventory.coin = (this.state.inventory.coin ?? 0) + price
+  // ── 装备洗练 ──────────────────────────────────────────────────────────────
+
+  /**
+   * 在背包和所有武魂的已穿戴里找一件装备。洗练必须支持**穿戴中**的装备——
+   * 玩家不会为了洗一件装备先脱下来再穿回去；而且脱下来洗会让 UI 上的战力对照断掉。
+   * 返回的是 state 里的对象引用，调用方可以就地改。
+   */
+  findEquip(itemId: string): EquipItem | null {
+    const inBag = this.state.equipBag.find(i => i.id === itemId)
+    if (inBag) return inBag
+    for (const entry of Object.values(this.state.roster)) {
+      for (const slot of EQUIP_SLOTS) {
+        const it = entry.equip?.[slot]
+        if (it && it.id === itemId) return it
+      }
+    }
+    return null
+  }
+
+  /**
+   * 洗练一条额外词条的消耗。UI 要在按钮上明示——洗练是重复动作，不该每次再弹确认框。
+   * 只消耗灵金，且按品阶固定：**洗第 N 次和洗第 1 次同价**，让玩家能自己算"还差多少灵金"。
+   */
+  reforgeCost(quality: Rarity): { coin: number } {
+    return { coin: EQUIP_REFORGE[quality].coin }
+  }
+
+  /**
+   * 洗练：重掷一件装备的第 idx 条**额外**词条（类型与数值一起重掷）。失败返回原因，不改任何状态。
+   *
+   * 只洗额外词条，先天词条一律不可洗 —— 理由见 data.ts 的 EQUIP_REFORGE。
+   * 扣费在重掷之前完成，任一步失败都不落盘，不会出现"扣了钱没洗成"。
+   */
+  reforgeEquip(itemId: string, idx: number): ReforgeResult {
+    const item = this.findEquip(itemId)
+    if (!item) return { ok: false, why: '找不到这件装备' }
+    if (!item.extra?.[idx]) return { ok: false, why: '没有这条词条（先天词条不可洗练）' }
+    const cost = this.reforgeCost(item.quality)
+    if (cost.coin <= 0) return { ok: false, why: '该品阶没有可洗练的词条' }
+    const coin = num(this.state.inventory.coin)
+    if (coin < cost.coin) return { ok: false, why: `灵金不足（需要 ${cost.coin}）` }
+    this.state.inventory.coin = coin - cost.coin
+    item.extra[idx] = rollReforgedAffix(item.quality)
+    this.save()
     this.emit()
+    return { ok: true, affix: item.extra[idx] }
   }
 
   // ── 装备评分与自动穿戴 ────────────────────────────────────────────────────
@@ -1171,11 +1768,14 @@ class GameStore {
   }
 
   /**
-   * 某角色**当前真实**的攻击/防御/气血（含星级、境界、异火、装备词条）。
+   * 某角色**裸属性**：当前真实攻击/防御/气血（含星级、境界、异火、装备词条）。**不含阵营羁绊**。
    *
    * UI 一律走这里，别自己写 `baseAtk + atkGrowth * level`——那正是「升星没有属性提升」的原因：
    * 星级/境界/异火/装备全都挂在 charStats 的加成层上，界面自算的那套等于把它们全漏掉，
    * 玩家点了升星看到数字纹丝不动（实际战斗数值已经涨了），只会认为功能坏了。
+   *
+   * ⚠️ 要显示"这个角色在战斗中是多少"请用 `battleStatsOf`：本函数不含 v1.28 的阵营羁绊，
+   * 而上阵角色在战斗里是吃的（同样的坑在 v1.29 又被踩了一次：显示裸值 615 / 战斗 763）。
    */
   statsOf(charId: string, starsOverride?: number) {
     const entry = this.state.roster[charId]

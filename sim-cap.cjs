@@ -22,13 +22,13 @@ for (const c of CONFIGS) {
   const get = t => { const l = lines.find(x => x.trim().startsWith(t)); return l ? l.trim() : '' }
   const finals = lines.filter(l => l.includes('主线第')).slice(-5, -1)
   const stages = finals.map(l => +(l.match(/主线第(\d+)关/)?.[1] ?? 0))
-  const chars = finals.map(l => +(l.match(/角色 (\d+)\/26/)?.[1] ?? 0))
+  const chars = finals.map(l => +(l.match(/角色 (\d+)\/54/)?.[1] ?? 0))
   const mn = Math.min(...stages), mx = Math.max(...stages)
   console.log(`\n── ${c.name} (上限 ×${Math.pow(c.pow, c.cap).toFixed(1)}) ──`)
   console.log(`   1天:${get('1天')}`)
   console.log(`   7天:${get('7天')}`)
   console.log(`   365天:${get('365天')}`)
   console.log(`   1年终局关卡分布: ${stages.join(' / ')}  → 极差 ${mx - mn}倍差=${(mx / Math.max(1, mn)).toFixed(1)}x`)
-  console.log(`   角色收集: ${chars.join(' / ')} /26`)
+  console.log(`   角色收集: ${chars.join(' / ')} /54`)
 }
 fs.unlinkSync(__dirname + '/_tmp_sim.cjs')

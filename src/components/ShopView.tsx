@@ -77,7 +77,7 @@ export default function ShopView() {
           </div>
         )}
         <div className="mt-1.5 text-[11px] leading-relaxed text-[#a89478]">
-          灵金来自闯关 / 刷关 / 卖装备。商品价格随当日购买次数指数递增、次日 0 点回落到基准，不设购买次数上限——靠价格自然限制。
+          灵金来自闯关 / 刷关掉落。商品价格随当日购买次数指数递增、次日 0 点回落到基准，不设购买次数上限——靠价格自然限制。
         </div>
       </div>
 

@@ -22,6 +22,10 @@ dist-ssr
 *.bak6
 *.bak7
 *.bak8
+# 素材全尺寸备份（159MB，v1.26 瘦身前的 1024 PNG）与抠图工具的逐文件回滚副本。
+# 这是**公开仓库**：目录一直没进过 git，只是没用 ignore 锁住 —— 一次 `git add -A` 就会全推进去。
+.backup-sprites-png/
+*.pocketbak
 
 # Editor directories and files
 .vscode/*
