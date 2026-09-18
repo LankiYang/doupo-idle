@@ -1,8 +1,12 @@
 import { useState, type ReactNode } from 'react'
+import { AlertTriangle } from 'lucide-react'
 import { useGame, game, charLabel, charStats, rarityInfo, fmtNum } from '../game/engine'
 import { portraitFor } from '../game/portraits'
 import { equipSlotIcon } from '../game/equipIcons'
-import { SLOT_INFO, AFFIX_LABEL, EQUIP_BREAKDOWN, type EquipSlot, type EquipItem, type EquipAffix } from '../game/data'
+import {
+  SLOT_INFO, AFFIX_LABEL, EQUIP_BREAKDOWN, EQUIP_ENH_PER_LV,
+  type EquipSlot, type EquipItem, type EquipAffix,
+} from '../game/data'
 
 const SLOTS: EquipSlot[] = ['weapon', 'armor', 'accessory', 'ring']
 
@@ -10,6 +14,11 @@ const SLOTS: EquipSlot[] = ['weapon', 'armor', 'accessory', 'ring']
 function breakdownText(item: EquipItem): string {
   const b = EQUIP_BREAKDOWN[item.quality]
   return b.xuanjing ? `武魂精血 ×${b.essence} · 玄晶 ×${b.xuanjing}` : `武魂精血 ×${b.essence}`
+}
+
+/** 强化等级对应的词条加成百分比（读 data.ts 的倍率，界面不复述这个数） */
+function enhPct(lv: number): number {
+  return Math.round(lv * EQUIP_ENH_PER_LV * 100)
 }
 
 /**
@@ -23,7 +32,7 @@ function AffixLine({ a, strong, right }: { a: EquipAffix; strong?: boolean; righ
       : a.roll >= 0.8 ? 'text-[#e8dcc8]'
         : a.roll >= 0.5 ? 'text-[#c9bda4]' : 'text-[#8a7658]'
   return (
-    <div className={`flex items-center gap-2 ${tone}`}>
+    <div className={`flex items-center gap-2 rounded bg-black/20 px-2 py-1 ${tone}`}>
       <span>{AFFIX_LABEL[a.type]}</span>
       <span className="ml-auto whitespace-nowrap">
         +{a.value}%{a.roll >= 1 && <span className="ml-0.5 text-[9px] text-dq-fire">✦</span>}
@@ -33,10 +42,49 @@ function AffixLine({ a, strong, right }: { a: EquipAffix; strong?: boolean; righ
   )
 }
 
-/** 装备详情：点击触发的浮层，桌面/触屏统一交互（原先用 hover 展示，触屏设备完全摸不到） */
-function ItemDetailModal({ item, compare, onBreakdown, onReforge, reforgeMsg, onClose }: {
+/**
+ * 装备详情：点击触发的浮层，桌面/触屏统一交互（原先用 hover 展示，触屏设备完全摸不到）。
+ *
+ * v1.38 起按用户要求"做大、做好看"：图标 64px、名称放大、品阶与强化等级做成徽章、
+ * 强化独立成块并带等级进度条与"下一级要多少 / 升完强多少"。
+ *
+ * v1.38.2：最高阶武器洗练后多一条**对比条**（原词条 ↔ 现在，可一键换回）。
+ * 新加的这块文案里**不许出现「灵金」**——见下面锚点②（它按"洗练块里含灵金的最深一层 div"
+ * 取消耗行，多一行含「灵金」的文字就会把那行顶掉）。这也是这里写"消耗"而不写"灵金"的原因。
+ *
+ * ️ 改版时有三处**不许动**，它们是回归脚本的锚点（verify-reforge / verify-ui-v125）：
+ *   ① 洗练块里不能出现「斗气结晶」四字 —— 脚本用它在证明"洗练只用灵金，不再要结晶"；
+ *      所以强化块与洗练块必须是**并列的两块**，别把强化消耗行塞进洗练块。
+ *   ② 洗练消耗行必须是洗练块内**最后一行含「灵金」**的 div，且富余 rgb(201,189,164) /
+ *      不足 rgb(248,113,113) 两种颜色不能换成别的色值。
+ *   ③ 卡片自身不设文字色、背景保持 bg-dq-panel、不加背景图（脚本按计算样式断言"实心不透明"）。
+ */
+/**
+ * 操作回执：`bad` 一为真就整条转成警示色并挂一个三角标。
+ *
+ * 原先成功与失败**共用同一个 `text-dq-gold`**，只有开头那个 emoji 不同
+ * （成功 `✦` / 失败 `⚠️`）—— 而 emoji 在本机根本没有字形（红线⑨），
+ * 开发的时候两者长得一模一样，玩家那边则取决于他的系统。**用 emoji 区分成败是假的区分。**
+ */
+type DetailMsg = { text: string; bad: boolean }
+
+function DetailMsgLine({ msg, className = '' }: { msg?: DetailMsg | null; className?: string }) {
+  if (!msg) return null
+  return (
+    <div className={`${className} text-[11px] ${msg.bad ? 'text-dq-fire' : 'text-dq-gold'}`}>
+      {msg.bad && <AlertTriangle size={11} className="mr-1 inline align-[-1px]" />}
+      {msg.text}
+    </div>
+  )
+}
+
+function ItemDetailModal({ item, compare, onBreakdown, onReforge, onUndoReforge, onEnhance, reforgeMsg, enhanceMsg, onClose }: {
   item: EquipItem; compare?: number | null; onBreakdown?: () => void
-  onReforge?: (idx: number) => void; reforgeMsg?: string; onClose: () => void
+  onReforge?: (idx: number) => void; onUndoReforge?: () => void; onEnhance?: (times: number) => void
+  // 提示一律用 `null` 表示"没有"（不是空串）—— 与 DetailMsgLine 的 `msg?: DetailMsg | null` 对齐，
+  // 也与 state 的类型一致。混用 '' 会让 `tsc -b` 报 "Argument of type '\"\"' is not assignable to
+  // parameter of type 'SetStateAction<DetailMsg | null>'"。
+  reforgeMsg?: DetailMsg | null; enhanceMsg?: DetailMsg | null; onClose: () => void
 }) {
   const state = useGame()
   const color = rarityInfo(item.quality).color
@@ -48,48 +96,163 @@ function ItemDetailModal({ item, compare, onBreakdown, onReforge, reforgeMsg, on
   // 黄阶没有额外词条、也就没有洗练（cost.coin 为 0），此时整块洗练 UI 都不该出现
   const canReforge = !!onReforge && item.extra.length > 0 && cost.coin > 0
   const afford = (state.inventory.coin ?? 0) >= cost.coin
+  // 强化的一切状态与价目都读引擎的 enhanceInfo，组件不自己查 EQUIP_ENHANCE（两份口径迟早分叉）
+  const enh = game.enhanceInfo(item)
+  const crystal = state.inventory.crystal ?? 0
+  const essence = state.inventory.essence ?? 0
+  const canEnhance = !!onEnhance && !enh.maxed
+  const affordOne = crystal >= enh.cost.crystal && essence >= enh.cost.essence
+  const affordMax = crystal >= enh.toMaxCost.crystal && essence >= enh.toMaxCost.essence
+  /**
+   * 上一次洗练前的词条（v1.38.2，仅最高阶武器有）。默认已经采用新结果，
+   * 这里只是把"原来那条"摆出来给玩家一次换回的机会——**两边并排**，
+   * 是因为玩家要比的正是"新的这条值不值得换掉旧的"，隔开或只显示一边都等于让他自己记。
+   */
+  const undoSnap = game.reforgeUndoOf(item.id)
+  const lvTone = enh.lv > 0 ? 'bg-dq-gold/20 text-dq-gold' : 'bg-black/30 text-[#8a7658]'
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/75 p-4" onClick={onClose}>
-      <div className="max-h-[85vh] w-64 overflow-auto rounded border bg-dq-panel p-3 text-xs shadow-2xl" style={{ borderColor: color }} onClick={e => e.stopPropagation()}>
-        <div className="mb-1 flex items-center gap-2">
-          {icon && <img src={icon} alt={item.slot} className="h-10 w-10 rounded object-cover" />}
-          <div style={{ color }}>{item.name}</div>
-        </div>
-        <div className="mb-2 text-[11px] text-[#a89478]">{SLOT_INFO[item.slot].label} · {rarityInfo(item.quality).label}</div>
-        {/* 先天词条不给洗练按钮：它是槽位的身份（戒指必给暴击率），洗掉这个概念就不成立了 */}
-        <AffixLine a={item.innate} strong />
-        {item.extra.map((a, i) => (
-          <AffixLine key={i} a={a} right={canReforge ? (
-            <button onClick={() => onReforge!(i)} disabled={!afford} data-affix-idx={i}
-              className={`rounded border px-1.5 py-0.5 text-[10px] ${afford
-                ? 'border-dq-border text-[#e8dcc8] hover:border-dq-fire'
-                : 'border-[#3a2a1a] text-[#5a4a38]'}`}>洗练</button>
-          ) : undefined} />
-        ))}
-        {/* 花在按钮上明示，不再弹确认框：洗练是要反复点的动作，每次确认反而折磨人 */}
-        {canReforge && (
-          <div className="mt-2 text-[10px]">
-            <div className="text-[#a89478]">洗练一条（类型与数值都重掷，价格固定不涨）</div>
-            <div className={afford ? 'text-[#c9bda4]' : 'text-red-400'}>
-              灵金 ×{fmtNum(cost.coin)}
+      <div className="max-h-[85vh] w-[21rem] overflow-auto rounded-lg border-2 bg-dq-panel p-4 text-sm shadow-2xl sm:w-[26rem]"
+        style={{ borderColor: color, boxShadow: `0 0 28px -8px ${color}` }} onClick={e => e.stopPropagation()}>
+
+        {/* ── 头部：大图标 + 名称 + 品阶/槽位 + 强化等级徽章 ── */}
+        <div className="flex items-start gap-3">
+          {/* 详情浮层里的大图标也走同一块承台 —— 这是玩家最仔细看装备图标的地方，
+              剑/甲那两张暗图在没有承台时几乎看不出是把剑 */}
+          {icon && <span className="dq-iconplate inline-block h-16 w-16 shrink-0 overflow-hidden rounded-md border"
+            style={{ borderColor: color }}>
+            <img src={icon} alt={item.slot} className="h-full w-full object-cover" />
+          </span>}
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-base font-semibold" style={{ color }}>{item.name}</div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="rounded px-1.5 py-0.5" style={{ backgroundColor: `${color}22`, color }}>
+                {rarityInfo(item.quality).label}
+              </span>
+              <span className="text-[#a89478]">{SLOT_INFO[item.slot].label}</span>
+              <span className={`ml-auto rounded px-1.5 py-0.5 font-mono ${lvTone}`}>+{enh.lv}</span>
             </div>
           </div>
-        )}
-        {reforgeMsg && <div className="mt-1 text-[11px] text-dq-gold">{reforgeMsg}</div>}
+        </div>
+
+        {/* ── 强化（v1.38）：与洗练是两块并列的 UI，别合并 ── */}
+        <div className="mt-3 rounded-md border border-dq-border bg-black/25 p-3">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="text-xs text-dq-gold">强化</span>
+            <span className="font-mono text-xs text-[#e8dcc8]">
+              +{enh.lv}<span className="text-[#5a4a38]"> / +{enh.cap}</span>
+            </span>
+          </div>
+          <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-black/50">
+            <div className="h-full rounded-full transition-all"
+              style={{ width: `${(enh.lv / Math.max(1, enh.cap)) * 100}%`, backgroundColor: color }} />
+          </div>
+          {enh.maxed ? (
+            <div className="text-[11px] text-[#a89478]">
+              已满级 —— 词条加成 ×{(1 + enh.cap * EQUIP_ENH_PER_LV).toFixed(2)}（{rarityInfo(item.quality).label}的上限是 +{enh.cap}）
+            </div>
+          ) : (
+            <>
+              <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                <span className="shrink-0 text-[#a89478]">下一级消耗</span>
+                <span className={`text-right ${affordOne ? 'text-[#c9bda4]' : 'text-red-400'}`}>
+                  斗气结晶 ×{fmtNum(enh.cost.crystal)} · 武魂精血 ×{fmtNum(enh.cost.essence)}
+                </span>
+              </div>
+              <div className="mt-1 flex items-baseline justify-between gap-2 text-[11px]">
+                <span className="text-[#a89478]">词条加成</span>
+                <span className="text-[#e8dcc8]">
+                  +{enhPct(enh.lv)}% <span className="text-[#5a4a38]">→</span> <span className="text-green-400">+{enhPct(enh.lv + 1)}%</span>
+                </span>
+              </div>
+              <div className="mt-2 flex gap-2">
+                <button onClick={() => onEnhance?.(1)} disabled={!canEnhance || !affordOne}
+                  className={`flex-1 rounded border py-1.5 text-xs ${canEnhance && affordOne
+                    ? 'border-dq-gold bg-dq-gold/15 text-dq-gold hover:bg-dq-gold/25'
+                    : 'border-[#3a2a1a] text-[#5a4a38]'}`}>强化 +1</button>
+                <button onClick={() => onEnhance?.(enh.cap - enh.lv)} disabled={!canEnhance || !affordMax}
+                  className={`flex-1 rounded border py-1.5 text-xs ${canEnhance && affordMax
+                    ? 'border-dq-border text-[#e8dcc8] hover:border-dq-gold'
+                    : 'border-[#3a2a1a] text-[#5a4a38]'}`}>强化至满级</button>
+              </div>
+            </>
+          )}
+          <DetailMsgLine msg={enhanceMsg} className="mt-1.5" />
+        </div>
+
+        {/* ── 词条 ── */}
+        <div className="mt-3">
+          <div className="mb-1.5 text-xs text-dq-gold">词条</div>
+          <div className="space-y-1">
+            {/* 先天词条不给洗练按钮：它是槽位的身份（戒指必给暴击率），洗掉这个概念就不成立了 */}
+            <AffixLine a={item.innate} strong />
+            {item.extra.map((a, i) => (
+              <AffixLine key={i} a={a} right={canReforge ? (
+                <button onClick={() => onReforge!(i)} disabled={!afford} data-affix-idx={i}
+                  className={`rounded border px-1.5 py-0.5 text-[10px] ${afford
+                    ? 'border-dq-border text-[#e8dcc8] hover:border-dq-fire'
+                    : 'border-[#3a2a1a] text-[#5a4a38]'}`}>洗练</button>
+              ) : undefined} />
+            ))}
+          </div>
+          {/* ── 洗练对比（v1.38.2）：最高阶武器专用。默认已采用新词条，这里给一次换回的机会 ── */}
+          {undoSnap && item.extra[undoSnap.idx] && (
+            <div className="mt-2 rounded-md border border-dq-gold/40 bg-dq-gold/5 p-2">
+              <div className="mb-1 text-[10px] text-dq-gold">
+                本次洗练对比（第 {undoSnap.idx + 1} 条 · 已采用新词条）
+              </div>
+              <div className="flex items-stretch gap-1.5 text-[11px]">
+                <div className="min-w-0 flex-1 rounded bg-black/25 px-2 py-1">
+                  <div className="text-[9px] text-[#8a7658]">原词条</div>
+                  <div className="truncate text-[#c9bda4]">{AFFIX_LABEL[undoSnap.from.type]} +{undoSnap.from.value}%</div>
+                </div>
+                <div className="flex shrink-0 items-center text-[#5a4a38]">→</div>
+                <div className="min-w-0 flex-1 rounded bg-black/25 px-2 py-1">
+                  <div className="text-[9px] text-[#8a7658]">现在</div>
+                  <div className="truncate text-[#ffd76a]">
+                    {AFFIX_LABEL[item.extra[undoSnap.idx].type]} +{item.extra[undoSnap.idx].value}%
+                  </div>
+                </div>
+              </div>
+              <button onClick={() => onUndoReforge?.()}
+                className="mt-1.5 w-full rounded border border-dq-gold/60 py-1 text-[11px] text-dq-gold hover:bg-dq-gold/15">
+                换回原词条
+              </button>
+              <div className="mt-1 text-[9px] text-[#8a7658]">换回不返还本次洗练的消耗，且只留这一次机会</div>
+            </div>
+          )}
+          {/* 花在按钮上明示，不再弹确认框：洗练是要反复点的动作，每次确认反而折磨人 */}
+          {canReforge && (
+            <div className="mt-2 text-[10px]">
+              <div className="text-[#a89478]">洗练一条（类型与数值都重掷，价格固定不涨）</div>
+              <div className={afford ? 'text-[#c9bda4]' : 'text-red-400'}>
+                灵金 ×{fmtNum(cost.coin)}
+              </div>
+            </div>
+          )}
+          <DetailMsgLine msg={reforgeMsg} className="mt-1" />
+        </div>
+
         {cmp !== null && (
-          <div className={`mt-2 text-[11px] ${cmp >= 1 ? 'text-green-400' : 'text-[#5a4a38]'}`}>
+          <div className={`mt-3 text-[11px] ${cmp >= 1 ? 'text-green-400' : 'text-[#5a4a38]'}`}>
             对该武魂：{cmp >= 1 ? `战力 +${fmtNum(cmp)}` : cmp <= -1 ? '不如当前穿戴' : '≈ 持平（战力不变）'}
           </div>
         )}
-        <div className="mt-2 border-t border-dq-border pt-2 text-[11px]">
+
+        <div className="mt-3 border-t border-dq-border pt-2 text-[11px]">
           <div className="text-[#a89478]">分解可得</div>
           <div className="text-[#c9bda4]">{breakdownText(item)}</div>
+          {enh.lv > 0 && (
+            <div className="mt-0.5 text-[#a89478]">
+              另退强化材料（已投入的七成）：斗气结晶 ×{fmtNum(enh.refund.crystal)} · 武魂精血 ×{fmtNum(enh.refund.essence)}
+            </div>
+          )}
         </div>
         {onBreakdown && (
           <button onClick={onBreakdown}
-            className="mt-2 w-full rounded border border-dq-border py-1 text-[11px] hover:border-dq-fire">分解</button>
+            className="mt-3 w-full rounded border border-dq-border py-1.5 text-xs hover:border-dq-fire">分解</button>
         )}
-        <button onClick={onClose} className="mt-1 w-full rounded border border-dq-border py-1 text-[11px] hover:border-dq-gold">关闭</button>
+        <button onClick={onClose} className="mt-1.5 w-full rounded border border-dq-border py-1.5 text-xs hover:border-dq-gold">关闭</button>
       </div>
     </div>
   )
@@ -101,8 +264,9 @@ export default function EquipmentView() {
   const [selectedChar, setSelectedChar] = useState<string | null>(teamIds[0] ?? null)
   const [peekItem, setPeekItem] = useState<EquipItem | null>(null)
   const [junkPreview, setJunkPreview] = useState<{ count: number; essence: number; xuanjing: number } | null>(null)
-  const [toast, setToast] = useState('')
-  const [reforgeMsg, setReforgeMsg] = useState('')
+  const [toast, setToast] = useState<DetailMsg | null>(null)
+  const [reforgeMsg, setReforgeMsg] = useState<DetailMsg | null>(null)
+  const [enhanceMsg, setEnhanceMsg] = useState<DetailMsg | null>(null)
 
   if (teamIds.length === 0 || !selectedChar) {
     return <div className="flex flex-1 items-center justify-center text-sm text-[#a89478]">先去阵容页编排队伍，再来管理装备</div>
@@ -117,10 +281,13 @@ export default function EquipmentView() {
 
   const bagSorted = [...state.equipBag].sort((a, b) => rarityInfo(b.quality).order - rarityInfo(a.quality).order)
   const isInBag = (item: EquipItem) => state.equipBag.some(i => i.id === item.id)
+  /** 强化等级徽章：引擎兜底过的值（缺字段/越界都在 equipLv 里收干净） */
+  const lvOf = (item: EquipItem) => game.equipLv(item)
 
-  /** 打开详情浮层。必须清掉上一次的洗练提示，否则换个装备打开会显示成"刚洗出的结果" */
+  /** 打开详情浮层。必须清掉上一次的洗练/强化提示，否则换个装备打开会显示成"刚洗出的结果" */
   function openItem(item: EquipItem) {
-    setReforgeMsg('')
+    setReforgeMsg(null)
+    setEnhanceMsg(null)
     setPeekItem(item)
   }
 
@@ -132,16 +299,48 @@ export default function EquipmentView() {
   function doReforge(idx: number) {
     if (!peekItem) return
     const r = game.reforgeEquip(peekItem.id, idx)
-    if (!r.ok || !r.affix) { setReforgeMsg(` ${r.why ?? '洗练失败'}`); return }
-    setReforgeMsg(`✦ 洗练完成：${AFFIX_LABEL[r.affix.type]} +${r.affix.value}%`)
+    if (!r.ok || !r.affix) { setReforgeMsg({ text: r.why ?? '洗练失败', bad: true }); return }
+    setReforgeMsg({ text: `洗练完成：${AFFIX_LABEL[r.affix.type]} +${r.affix.value}%`, bad: false })
+  }
+
+  /**
+   * 换回上一次洗练前的词条（v1.38.2，仅最高阶武器）。**不退费**，理由见 engine.undoReforge。
+   * 快照用掉即清空（引擎里做的），所以这里不用手动关掉对比条——emit 一响它就自己没了。
+   */
+  function doUndoReforge() {
+    if (!peekItem) return
+    const r = game.undoReforge(peekItem.id)
+    if (!r.ok || !r.affix) { setReforgeMsg({ text: r.why ?? '换回失败', bad: true }); return }
+    setReforgeMsg({ text: `已换回原词条：${AFFIX_LABEL[r.affix.type]} +${r.affix.value}%`, bad: false })
+  }
+
+  /**
+   * 强化：times=1 是点一次升一级，times=上限-当前 就是「强化至满级」。
+   * 引擎是**逐级扣费、扣到哪级算哪级**的：材料只够 3 级时返回 levels=3 且 ok=true，
+   * 界面上要如实说"升了 3 级 + 为什么停下"，不能说成失败（那样玩家会以为按钮坏了）。
+   */
+  function doEnhance(times: number) {
+    if (!peekItem) return
+    const r = game.enhanceEquip(peekItem.id, times)
+    const now = game.enhanceInfo(peekItem)
+    if (!r.ok) { setEnhanceMsg({ text: r.why ?? '强化失败', bad: true }); return }
+    setEnhanceMsg({ text: `强化成功 +${now.lv}${r.why ? `（${r.why}）` : ''}`, bad: false })
   }
 
   function doAutoEquip() {
     const r = game.autoEquipBest()
     const shown = Math.round(r.powerGain)
-    setToast(r.changed
-      ? `✓ 已为 ${teamIds.length} 名上阵武魂自动换上四件套（调整 ${r.changed} 件，${shown >= 1 ? `战力 +${fmtNum(shown)}` : '显示战力持平'}）`
-      : '当前穿戴已是最优，无需调整')
+    setToast({ text: r.changed
+      ? `已为 ${teamIds.length} 名上阵武魂自动换上四件套（调整 ${r.changed} 件，${shown >= 1 ? `战力 +${fmtNum(shown)}` : '显示战力持平'}）`
+      : '当前穿戴已是最优，无需调整', bad: false })
+  }
+
+  /** 单件分解（背包卡片上的按钮）。强化过的会一并退还材料，要让玩家看到退了什么 */
+  function doBreakdown(item: EquipItem) {
+    const r = game.breakdownEquip(item.id)
+    if (!r) { setToast({ text: '分解失败（这件装备品阶无法识别，已保留）', bad: true }); return }
+    const back = r.refundCrystal ? ` · 退还斗气结晶 ×${fmtNum(r.refundCrystal)} / 武魂精血 ×${fmtNum(r.refundEssence)}` : ''
+    setToast({ text: `分解 1 件，获得武魂精血 ×${r.essence}${r.xuanjing ? ` · 玄晶 ×${r.xuanjing}` : ''}${back}`, bad: false })
   }
 
   /** 先扫一遍算出会分解多少、产出多少，让玩家确认后才真正执行 */
@@ -152,14 +351,15 @@ export default function EquipmentView() {
       const b = EQUIP_BREAKDOWN[item.quality]
       count++; essence += b.essence; xuanjing += b.xuanjing
     }
-    if (!count) { setToast('没有可分解的装备（背包里的都还有用武之地）'); return }
+    if (!count) { setToast({ text: '没有可分解的装备（背包里都还有用武之地）', bad: true }); return }
     setJunkPreview({ count, essence, xuanjing })
   }
 
   function confirmJunk() {
     const r = game.breakdownJunk()
     setJunkPreview(null)
-    setToast(`✓ 分解 ${r.count} 件，获得武魂精血 ×${r.essence}${r.xuanjing ? ` · 玄晶 ×${r.xuanjing}` : ''}`)
+    const back = r.refundCrystal ? ` · 退还斗气结晶 ×${fmtNum(r.refundCrystal)} / 武魂精血 ×${fmtNum(r.refundEssence)}` : ''
+    setToast({ text: `分解 ${r.count} 件，获得武魂精血 ×${r.essence}${r.xuanjing ? ` · 玄晶 ×${r.xuanjing}` : ''}${back}`, bad: false })
   }
 
   return (
@@ -203,17 +403,24 @@ export default function EquipmentView() {
                 className="rounded border border-dq-border px-2.5 py-1 text-[11px] text-[#e8dcc8] hover:border-dq-fire">一键分解垃圾</button>
             </div>
           </div>
-          {toast && <div className="mb-2 text-[11px] text-dq-gold">{toast}</div>}
+          <DetailMsgLine msg={toast} className="mb-2" />
           <div className="grid grid-cols-4 gap-1.5 sm:gap-3">
             {SLOTS.map(slot => {
               const item = entry.equip[slot]
               const icon = equipSlotIcon(slot)
               const color = item ? rarityInfo(item.quality).color : '#3a2a1a'
+              const lv = item ? lvOf(item) : 0
               return (
                 <div key={slot} className="rounded border p-2 text-center text-xs" style={{ borderColor: color }}>
-                  <div className="mb-1 text-[10px] text-[#a89478]">{SLOT_INFO[slot].label}</div>
-                  <button onClick={() => item && setPeekItem(item)} disabled={!item}
-                    className="mx-auto mb-1 block h-11 w-11 overflow-hidden rounded bg-black/30 sm:h-14 sm:w-14">
+                  {/* 强化等级外显：槽位标签旁边的小徽章，0 级也显示（否则玩家不知道这件能强化） */}
+                  <div className="mb-1 flex items-center justify-center gap-1 text-[10px]">
+                    <span className="text-[#a89478]">{SLOT_INFO[slot].label}</span>
+                    {item && (
+                      <span className={`rounded px-1 font-mono ${lv > 0 ? 'bg-dq-gold/20 text-dq-gold' : 'text-[#5a4a38]'}`}>+{lv}</span>
+                    )}
+                  </div>
+                  <button onClick={() => item && openItem(item)} disabled={!item}
+                    className="dq-iconplate mx-auto mb-1 block h-11 w-11 overflow-hidden rounded sm:h-14 sm:w-14">
                     {icon && <img src={icon} alt={slot} className="h-full w-full object-cover" style={{ opacity: item ? 1 : 0.3 }} />}
                   </button>
                   {item ? (
@@ -243,12 +450,15 @@ export default function EquipmentView() {
               {bagSorted.map(item => {
                 const color = rarityInfo(item.quality).color
                 const icon = equipSlotIcon(item.slot)
+                const lv = lvOf(item)
                 const gain = game.powerIfEquipped(selectedChar, item) - basePower
                 // 同上：按取整后的显示战力分档，避免出现"↑ 战力 +0"
                 const gained = Math.round(gain)
                 return (
                   <div key={item.id} className="relative rounded border p-1.5 text-center text-[10px]" style={{ borderColor: color }}>
-                    <button onClick={() => openItem(item)} className="mx-auto block h-10 w-10 overflow-hidden rounded bg-black/30">
+                    {/* 强化等级外显：卡片右上角徽章，>=1 级才上金色 */}
+                    <span className={`pointer-events-none absolute right-0.5 top-0.5 rounded bg-black/70 px-1 font-mono text-[9px] ${lv > 0 ? 'text-dq-gold' : 'text-[#5a4a38]'}`}>+{lv}</span>
+                    <button onClick={() => openItem(item)} className="dq-iconplate mx-auto block h-10 w-10 overflow-hidden rounded">
                       {icon && <img src={icon} alt={item.slot} className="h-full w-full object-cover" />}
                     </button>
                     <button onClick={() => openItem(item)} className="w-full truncate" style={{ color }}>{item.name}</button>
@@ -259,7 +469,7 @@ export default function EquipmentView() {
                       <button onClick={() => game.equipItem(selectedChar, item.id)}
                         className="w-full rounded bg-dq-gold py-0.5 text-black">穿戴</button>
                     </div>
-                    <button onClick={() => game.breakdownEquip(item.id)}
+                    <button onClick={() => doBreakdown(item)}
                       className="mt-0.5 w-full rounded border border-dq-border py-0.5 hover:border-dq-fire">分解</button>
                   </div>
                 )
@@ -272,10 +482,13 @@ export default function EquipmentView() {
       {peekItem && (
         <ItemDetailModal item={peekItem}
           compare={isInBag(peekItem) ? game.powerIfEquipped(selectedChar, peekItem) - basePower : null}
-          onBreakdown={isInBag(peekItem) ? () => { game.breakdownEquip(peekItem.id); setPeekItem(null) } : undefined}
+          onBreakdown={isInBag(peekItem) ? () => { doBreakdown(peekItem); setPeekItem(null) } : undefined}
           onReforge={doReforge}
+          onUndoReforge={doUndoReforge}
+          onEnhance={doEnhance}
           reforgeMsg={reforgeMsg}
-          onClose={() => { setPeekItem(null); setReforgeMsg('') }} />
+          enhanceMsg={enhanceMsg}
+          onClose={() => { setPeekItem(null); setReforgeMsg(null); setEnhanceMsg(null) }} />
       )}
 
       {junkPreview && (

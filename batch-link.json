@@ -1,0 +1,17 @@
+[
+  {
+    "name": "韩立",
+    "out": "characters/hanli.png",
+    "prompt": "Han Li, the protagonist of A Record of a Mortal's Journey to Immortality, a young male cultivator of unremarkable ordinary looks with slightly tanned skin and calm, deep, calculating eyes, wearing a plain dark teal-green long robe with simple cloth sash, holding a small emerald bamboo sword in one hand, faint azure sword qi and tiny golden insect-like spirit lights swirling around him, cautious composed expression, no arrogance. ultra-detailed refined texture, semi-realistic anime illustration, bust portrait, centered composition, cinematic rim lighting, Chinese xianxia cultivation fantasy theme, simple dark gradient background, intricate clothing folds, game gacha splash art quality, masterpiece"
+  },
+  {
+    "name": "银月",
+    "out": "characters/yinyue.png",
+    "prompt": "Yin Yue, an ethereal female cultivator from A Record of a Mortal's Journey to Immortality, long flowing silver-white hair, a delicate crescent moon mark on her forehead, pale silver-white and moon-blue layered robe with flowing ribbons, cold elegant breathtaking beauty with faint demonic wolf-spirit aura, moonlight glow around her, serene aloof expression. ultra-detailed refined texture, semi-realistic anime illustration, bust portrait, centered composition, cinematic rim lighting, Chinese xianxia cultivation fantasy theme, simple dark gradient background, intricate clothing folds, game gacha splash art quality, masterpiece"
+  },
+  {
+    "name": "联动海报",
+    "out": "link/poster.png",
+    "prompt": "vertical poster composition, 2:3 portrait aspect ratio, Chinese xianxia game event key visual: two cultivators standing back to back — a plain ordinary-looking young swordsman in a dark teal robe holding an emerald bamboo sword, and a stunning silver-haired woman with a crescent moon mark, azure sword qi and silver moonlight energy swirling around them, misty immortal mountain peaks and a pale full moon in the background, dramatic cinematic lighting, epic fantasy splash poster, highly detailed painterly illustration, no text, no letters, no words, no watermark, no logo"
+  }
+]

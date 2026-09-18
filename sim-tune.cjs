@@ -22,7 +22,7 @@ function mkStage(hpB,atkB,defB){return s=>{const b=s%5===0?1.6:1;return{
 function cs(e,cd,realmPow){
   // ⚠️ 本脚本是 v1.7 的调参模型（RM 只有 5 种定位、没有职责维），星级系数这一行已同步 v1.28.9 口径。
   //    唯一权威是 src/game/data.ts 的 starMultOf —— 别拿本脚本的输出去论证当前平衡。
-  const sm=1+e.stars*0.08+0.1*Math.floor(e.stars/10), rm=Math.pow(realmPow,realmIdx(e.level))
+  const sm=starMult(e.stars), rm=Math.pow(realmPow,realmIdx(e.level))
   return{atk:Math.round((cd.baseAtk+cd.atkGrowth*e.level)*sm*rm),
     def:Math.round((cd.baseDef+cd.defGrowth*e.level)*sm*rm),
     hp:Math.round((cd.baseHp+cd.hpGrowth*e.level)*sm*rm)}}

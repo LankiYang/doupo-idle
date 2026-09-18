@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react'
-import { useGame, game, charLabel, rarityInfo, itemLabel, TEAM_FRONT_SIZE, TEAM_BACK_SIZE, type TeamSlotPos, type CombatEffect } from '../game/engine'
+import { Swords } from 'lucide-react'
+import { useGame, game, charLabel, rarityInfo, itemLabel, newbieCurrent, combatPower, fmtNum, TEAM_FRONT_SIZE, TEAM_BACK_SIZE, type TeamSlotPos, type CombatEffect } from '../game/engine'
+import { itemSprite } from '../game/icons'
+import Ico from './Ico'
 import { portraitFor } from '../game/portraits'
 import { xpToNext, realmLabel, needsPillFor, pillGradeFor, FIRES, MAX_STARS, STARS_PER_TIER, STAR_TIERS, STAR_TIER_JUMP, starUpCost, starTierOf, starTierIndex, RELEASE_REFUND, ROLE_LABEL, ROLE_TARGET_HINT, DUTY_OF_ROLE, DUTY_LABEL, DUTY_COLOR, FACTIONS, FACTION_OF, bondBonusesFor } from '../game/data'
 
@@ -45,9 +48,26 @@ function starGlyphs(stars: number): string {
   return '★'.repeat(inTier) + '☆'.repeat(STARS_PER_TIER - inTier)
 }
 
-export default function RosterView() {
+export default function RosterView({ focusId, onFocusConsumed }: {
+  /** 带意图跳转（新手之路第二步）：落地直接选中这名角色 */
+  focusId?: string | null
+  onFocusConsumed?: () => void
+} = {}) {
   const state = useGame()
   const [selected, setSelected] = useState<string | null>(null)
+
+  /**
+   * 新手之路第二步跳过来时，右栏默认是一张**空详情面板**（selected 初始为 null）——
+   * 引导说的"去打坐修炼"那个滑条根本不在屏幕上，等于指了个不存在的东西。
+   * 所以带 focusId 进来时直接选中它；消费掉之后通知外层清空，免得玩家下次自己
+   * 切到阵容页又被强行选中一次。
+   */
+  useEffect(() => {
+    if (focusId && state.roster[focusId]) {
+      setSelected(focusId)
+      onFocusConsumed?.()
+    }
+  }, [focusId])
   const [assignTarget, setAssignTarget] = useState<AssignTarget>(null)
   // 拖拽状态：从名录拖（from = null）还是从某个阵位拖（from = 那个坐标）
   const [dragging, setDragging] = useState<{ id: string; from: TeamSlotPos | null } | null>(null)
@@ -211,9 +231,128 @@ export default function RosterView() {
       </div>
 
       <div className="dq-panel min-w-0 flex-1 rounded-md p-4">
-        {selected ? <CharDetail key={selected} id={selected} onAssign={(row, idx) => game.setSlot(row, idx, selected)} onSold={() => setSelected(null)} /> : (
-          <div className="flex h-full items-center justify-center text-[#a89478]">点击左侧武魂查看详情，或先点一个空位再选武魂快速编入</div>
-        )}
+        {selected ? <CharDetail key={selected} id={selected} onAssign={(row, idx) => game.setSlot(row, idx, selected)} onSold={() => setSelected(null)} /> : <TeamOverview onPick={setSelected} />}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 阵容总览（v1.44）—— 占的是**右栏没选人时**那一整块。
+ *
+ * 这里原先只有一行居中的灰字「点击左侧武魂查看详情…」，在桌面端那是一块
+ * **占了屏幕三分之二的死空间**：玩家一进阵容页，看到的是半屏空白，
+ * 而这一页恰恰是全站信息密度最高的一页（羁绊、异火、名录、阵位全在这）。
+ *
+ * 放什么进来有一条硬约束：**只能是已经为真的东西**，不许造数。
+ * 于是取三样都能从 state 直接读出来的：
+ *   · 队伍战力 —— 走 `combatPower`，与排行榜上传的是**同一个函数**
+ *     （界面自己再算一遍就迟早会和榜单对不上，那类投诉已经有过）
+ *   · 上阵人数与空位 —— 直接数阵位
+ *   · 操作指引 —— 把左栏那三句散落的提示收在一处，新玩家第一次进来会看到
+ * 不在这里放"推荐上阵"之类的建议：那需要一套引擎侧的评价口径，不是本次改版的事。
+ */
+function TeamOverview({ onPick }: { onPick: (id: string) => void }) {
+  const state = useGame()
+  const slots = [...state.team.front, ...state.team.back]
+  const filled = slots.filter(Boolean).length
+  const empty = slots.length - filled
+  const power = combatPower(state)
+  const bonds = bondBonusesFor(slots)
+  const owned = Object.keys(state.roster).length
+  const activeBonds = bonds.active.filter(b => b.tier).length
+
+  // 阵位 → (行, 序号)：给每个上阵成员标出"他站哪"，与左栏六个格子一一对得上
+  const seatOf = (i: number) => i < TEAM_FRONT_SIZE
+    ? `前${i + 1}`
+    : `后${i - TEAM_FRONT_SIZE + 1}`
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between">
+        <div className="text-dq-gold">阵容总览</div>
+        <div className="text-[11px] text-[#a89478]">
+          武魂 {owned} 名 · 上阵 <span className="tabular-nums text-[#e8dcc8]">{filled}</span>/{slots.length}
+        </div>
+      </div>
+
+      {/* 战力条：数字走 combatPower（与排行榜上传的是同一个函数），
+          旁边两个小块说清"阵位还剩几个、羁绊凑出来没有"——
+          这三样是玩家在阵容页唯一需要一眼确认的状态。 */}
+      <div className="mt-3 flex items-stretch gap-2">
+        <div className="dq-slot flex flex-1 items-center justify-between rounded px-3 py-2">
+          <span className="text-[11px] text-[#a89478]">队伍战力</span>
+          <span className="text-2xl leading-none tabular-nums text-dq-gold" data-stat="team-power">{fmtNum(power)}</span>
+        </div>
+        <div className="dq-slot flex min-w-[6.5rem] flex-col justify-center rounded px-2.5 py-2 text-[11px]">
+          <div className="text-[#a89478]">阵位</div>
+          <div className={empty > 0 ? 'text-dq-fire' : 'text-dq-qing'}>
+            {empty > 0 ? `空 ${empty} 个` : '已满 6 人'}
+          </div>
+        </div>
+        <div className="dq-slot flex min-w-[6.5rem] flex-col justify-center rounded px-2.5 py-2 text-[11px]">
+          <div className="text-[#a89478]">阵营羁绊</div>
+          <div className={activeBonds > 0 ? 'text-dq-fire' : 'text-[#5a4a38]'}>
+            {activeBonds > 0 ? `已激活 ${activeBonds} 条` : '尚未激活'}
+          </div>
+        </div>
+      </div>
+
+      {/* 上阵成员：把"这六个人到底是谁、谁在扛"列出来。
+          左栏虽然画着头像，但那里只有图没有数 —— 而"我该练谁"靠的正是下一行这个战力。 */}
+      <div className="mt-3">
+        <div className="mb-1.5 text-xs text-dq-gold">上阵成员</div>
+        <div className="space-y-1">
+          {slots.map((id, i) => {
+            const seat = seatOf(i)
+            if (!id) {
+              return (
+                <div key={i} className="dq-slot flex items-center gap-2 rounded px-2 py-1 text-[11px] text-[#5a4a38]" data-seat={seat}>
+                  <span className="w-7 shrink-0">{seat}</span>
+                  <span>空位 · 点左栏这个格子编入，或从名录拖一个人过来</span>
+                </div>
+              )
+            }
+            const cdef = charLabel(id)
+            if (!cdef) {
+              // 名录里认不出的 id（存档里留了个已下架角色的残留）：如实说明，不静默画个空格
+              return (
+                <div key={i} className="dq-slot flex items-center gap-2 rounded px-2 py-1 text-[11px] text-dq-fire" data-seat={seat}>
+                  <span className="w-7 shrink-0">{seat}</span>
+                  <span>该武魂已不在名录中（{id}）</span>
+                </div>
+              )
+            }
+            const rarity = rarityInfo(cdef.rarity)
+            const portrait = portraitFor(id)
+            const duty = DUTY_OF_ROLE[cdef.role]
+            return (
+              <button key={i} onClick={() => onPick?.(id)} data-seat={seat} data-team-char={id}
+                className="flex w-full items-center gap-2 rounded border border-dq-border px-2 py-1 text-left text-[11px] hover:border-dq-gold">
+                <span className="w-7 shrink-0 text-[#a89478]">{seat}</span>
+                <span className="h-6 w-6 shrink-0 overflow-hidden rounded-sm border" style={{ borderColor: rarity.color }}>
+                  {portrait && <img src={portrait} alt={cdef.name} className="h-full w-full object-cover" />}
+                </span>
+                <span className="min-w-0 flex-1 truncate" style={{ color: rarity.color }}>{cdef.name}</span>
+                <span className="shrink-0 rounded px-1 text-[9px] text-black" style={{ background: DUTY_COLOR[duty] }}>{DUTY_LABEL[duty]}</span>
+                <span className="shrink-0 tabular-nums text-[#a89478]">战力 {fmtNum(game.powerOf(id))}</span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="mt-4 text-[11px] leading-relaxed text-[#a89478]">
+        <div className="mb-1.5 text-xs text-dq-gold">怎么排阵</div>
+        <div className="space-y-1">
+          <div>① 点左侧名录里的武魂 —— 右栏会显示他的详情，再点下方「前排N / 后排N」编入</div>
+          <div>② 点一个<b className="text-[#e8dcc8]">空位</b>：手里已选中人就直接编入，没选中就进入「点武魂」模式</div>
+          <div>③ 桌面端可以直接<b className="text-[#e8dcc8]">拖动</b>：名录拖进阵位 = 编入，阵位拖到阵位 = 换位</div>
+        </div>
+      </div>
+
+      <div className="mt-auto pt-3 text-[10px] leading-relaxed text-[#5a4a38]">
+        前排先挨打、后排后挨打；异火只认前排第一位。阵型摆好后去战斗页开自动出战。
       </div>
     </div>
   )
@@ -303,7 +442,7 @@ function FirePanel() {
             <button key={f.id} disabled={!owned}
               onClick={() => game.equipFire(equipped ? null : f.id)}
               className={`flex w-full items-center gap-2 rounded border px-2 py-1 text-left text-xs disabled:opacity-30 ${equipped ? 'border-dq-fire' : 'border-dq-border hover:border-dq-gold'}`}>
-              <span>{f.icon}</span>
+              <Ico name={`icons/fire_${f.id}`} emoji={f.icon} className="h-6 w-6 shrink-0" />
               <span className="min-w-0 flex-1">
                 <div className={equipped ? 'text-dq-fire' : 'text-[#e8dcc8]'}>{f.name}{equipped && ' · 已装配'}</div>
                 <div className="truncate text-[#a89478]">{owned ? f.desc : `未获得 · ${f.source}`}</div>
@@ -381,6 +520,8 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
   const cdef = charLabel(id)
   const entry = state.roster[id]
   if (!cdef || !entry) return null
+  // 新手之路第 2 步指向的就是这个按钮：呼吸灯亮在这里（引导条自己不再亮）
+  const nbTrain = newbieCurrent(state)?.key === 'train'
   const rarity = rarityInfo(cdef.rarity)
   // 职责（战斗/坦克/医师）与攻击方式（群攻/单体…）是两件正交的事，两个标签都要给：
   // 只标"坦克"玩家不知道它打得怎么样，只标"群攻"又不知道它该站哪
@@ -424,7 +565,10 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
             </div>
             <div className="mt-0.5 text-xs text-[#5a4a38]">{cdef.desc}</div>
             {/* 打法说明：把引擎里的目标选择规则摆到明面上，玩家排阵前就知道"他会去打谁" */}
-            <div className="mt-1 text-xs text-dq-fire/80">⚔ {ROLE_TARGET_HINT[cdef.role]}</div>
+            <div className="mt-1 flex items-center gap-1 text-xs text-dq-fire/80">
+            <Swords size={12} className="shrink-0" />
+            <span>{ROLE_TARGET_HINT[cdef.role]}</span>
+          </div>
           </div>
           <div className="text-right">
             <div className="text-dq-gold">{realmLabel(entry.level)}</div>
@@ -505,7 +649,8 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
             className="flex-1" />
           <span className="w-20 text-right text-sm">{Math.min(trainAmt, snapCrystal)} 结晶</span>
           <button onClick={() => game.trainChar(id, trainAmt)}
-            className="rounded bg-dq-gold px-3 py-1 text-sm text-black">打坐修炼</button>
+            data-newbie-hint={nbTrain ? '1' : undefined}
+            className={`rounded bg-dq-gold px-3 py-1 text-sm text-black ${nbTrain ? 'dq-breath' : ''}`}>打坐修炼</button>
         </div>
 
         <div className="mt-4 flex items-center gap-2">
@@ -527,7 +672,7 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
               <>
                 <button onClick={() => game.starUp(id)} disabled={have < c.amount}
                   className="rounded border border-dq-border px-3 py-1 text-sm hover:border-dq-gold disabled:opacity-40">
-                  升星 {entry.stars}★→{entry.stars + 1}★（消耗 {c.amount} {itemLabel(c.item).icon}{itemLabel(c.item).name}，拥有 {Math.floor(have)}）
+                  升星 {entry.stars}★→{entry.stars + 1}★（消耗 {c.amount} {itemLabel(c.item).name}，拥有 {Math.floor(have)}）
                 </button>
                 {/* 把"这一星到底涨多少"写在按钮旁：星级加成挂在 charStats 的加成层，
                     光看星级字形涨了、数字不动，玩家会以为没生效（曾经的 bug 就是这么被发现的） */}
@@ -578,19 +723,19 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
                     返还已投入资源的 {Math.round(RELEASE_REFUND * 100)}%（角色本身的价值照给）：
                   </div>
                   <div>
-                     {itemLabel('essence').name} ×{refund.essence}
+                    <Ico name={itemSprite('essence')} className="h-3.5 w-3.5 align-[-3px]" /> {itemLabel('essence').name} ×{refund.essence}
                     <span className="text-[#a89478]">（本身 {refund.own} + 升星 {refund.essence - refund.own}）</span>
                   </div>
                   {refund.xuanjing > 0 && (
-                    <div>🔮 {itemLabel('xuanjing').name} ×{refund.xuanjing}
+                    <div><Ico name={itemSprite('xuanjing')} className="h-3.5 w-3.5 align-[-3px]" /> {itemLabel('xuanjing').name} ×{refund.xuanjing}
                       <span className="text-[#a89478]">（投入 {refund.invested.xuanjing}）</span></div>
                   )}
                   {refund.crystal > 0 && (
-                    <div> {itemLabel('crystal').name} ×{refund.crystal}
+                    <div><Ico name={itemSprite('crystal')} className="h-3.5 w-3.5 align-[-3px]" /> {itemLabel('crystal').name} ×{refund.crystal}
                       <span className="text-[#a89478]">（投入 {refund.invested.crystal}）</span></div>
                   )}
                   {Object.entries(refund.pills).map(([pid, n]) => (
-                    <div key={pid}>{itemLabel(pid).icon} {itemLabel(pid).name} ×{n}
+                    <div key={pid}><Ico name={itemSprite(pid)} className="h-3.5 w-3.5 align-[-3px]" /> {itemLabel(pid).name} ×{n}
                       <span className="text-[#a89478]">（投入 {refund.invested.pills[pid] ?? 0}）</span></div>
                   ))}
                   <div className="text-[#5a4a38]">身上的装备会退回背包</div>

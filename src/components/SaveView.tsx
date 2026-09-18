@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { game } from '../game/engine'
 import { getPlayerId, setPlayerId, agoText } from '../game/leaderboardApi'
 import { uploadSave, downloadSave, applyCloudSave, getCloudMeta, summarizeSave, type CloudSave } from '../game/saveApi'
+import { SAVE_KEY } from '../game/storageKeys'
 
 type Msg = { kind: 'ok' | 'err' | 'info'; text: string } | null
 
@@ -61,7 +62,7 @@ export default function SaveView() {
   }
 
   let localRaw: string | null = null
-  try { localRaw = localStorage.getItem('doupo-idle-save-v1') } catch { /* ignore */ }
+  try { localRaw = localStorage.getItem(SAVE_KEY) } catch { /* ignore */ }
   const localSum = localRaw ? summarizeSave(localRaw) : null
   const cloudSum = pending ? summarizeSave(pending.save.data) : null
   const msgColor = msg ? (msg.kind === 'ok' ? 'text-green-400' : msg.kind === 'err' ? 'text-red-400' : 'text-[#a89478]') : ''

@@ -1,5 +1,7 @@
 import { useGame, game, fmtNum, pillCraftCost } from '../game/engine'
 import { PILLS, REALMS, SHOP_GOODS, SHOP_BUFFS, type ShopGood } from '../game/data'
+import { itemSprite, buffSprite, shopGoodSprite } from '../game/icons'
+import Ico from './Ico'
 
 function realmForGrade(grade: number): string {
   const idx = REALMS.findIndex(r => r.pillGrade === grade)
@@ -30,7 +32,7 @@ export default function ShopView() {
     return (
       <div key={g.id} className="rounded border border-dq-border p-2 text-xs">
         <div className="flex items-start gap-2">
-          <span className="text-xl leading-none">{g.icon}</span>
+          <Ico name={shopGoodSprite(g)} emoji={g.icon} className="h-6 w-6 shrink-0" />
           <div className="min-w-0 flex-1">
             <div className="truncate text-dq-gold">{g.name}</div>
             <div className="text-[#a89478]">{g.desc}</div>
@@ -40,7 +42,7 @@ export default function ShopView() {
           <div className="mt-1 text-[10px] text-dq-fire">生效中 · 剩 {remainText(liveBuff.expireAt)}（再买续时）</div>
         )}
         <div className="mt-1.5 flex items-center justify-between gap-2">
-          <span className="text-[#a89478]">🪙 {fmtNum(price)}
+          <span className="flex items-center gap-1 text-[#a89478]"><Ico name={itemSprite('coin')} className="h-3.5 w-3.5" />{fmtNum(price)}
             {count > 0 && <span className="ml-1 text-[10px] text-[#5a4a38]">今日第 {count + 1} 件</span>}
           </span>
           <button onClick={() => game.buyShopItem(g.id)} disabled={!canAfford}
@@ -61,7 +63,11 @@ export default function ShopView() {
       <div className="dq-panel rounded-md p-3">
         <div className="flex items-center justify-between">
           <div className="text-dq-gold">商城</div>
-          <div className="text-sm text-[#a89478]">🪙 灵金 <span className="tabular-nums text-dq-gold">{fmtNum(coin)}</span></div>
+          <div className="flex items-center gap-1 text-sm text-[#a89478]">
+            <Ico name={itemSprite('coin')} className="h-4 w-4" />
+            <span>灵金</span>
+            <span className="tabular-nums text-dq-gold">{fmtNum(coin)}</span>
+          </div>
         </div>
         {activeBuffs.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1">
@@ -70,7 +76,7 @@ export default function ShopView() {
               if (!def) return null
               return (
                 <span key={b.id} className="rounded border border-dq-fire px-1.5 py-0.5 text-[10px] text-dq-fire">
-                  {def.icon} {def.name} {remainText(b.expireAt)}
+                  <Ico name={buffSprite(b.id)} emoji={def.icon} className="h-3 w-3 align-[-2px]" /> {def.name} {remainText(b.expireAt)}
                 </span>
               )
             })}
@@ -92,7 +98,7 @@ export default function ShopView() {
       <div className="dq-panel rounded-md p-3">
         <div className="mb-0.5 text-sm text-dq-gold">丹房</div>
         <div className="mb-2 text-[11px] text-[#a89478]">
-          药园挂机产出 🌿灵药（当前 {fmtNum(state.inventory.herb ?? 0)}），消耗灵药 + 灵金炼制丹药，用于角色跨境界突破
+          药园挂机产出 <Ico name={itemSprite('herb')} className="inline h-3.5 w-3.5 align-[-3px]" />灵药（当前 {fmtNum(state.inventory.herb ?? 0)}），消耗灵药 + 灵金炼制丹药，用于角色跨境界突破
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {PILLS.map(p => {
@@ -101,11 +107,15 @@ export default function ShopView() {
             const canAfford = (state.inventory.herb ?? 0) >= cost.herb && (state.inventory.coin ?? 0) >= cost.coin
             return (
               <div key={p.id} className="rounded border border-dq-border p-2 text-center text-xs">
-                <div className="text-2xl">{p.icon}</div>
+                <Ico name={itemSprite(p.id)} emoji={p.icon} className="mx-auto h-10 w-10" />
                 <div className="mt-1 text-dq-gold">{p.name}</div>
                 <div className="text-[#a89478]">{realmForGrade(p.grade)}</div>
                 <div className="mt-1 text-[#a89478]">拥有 ×{Math.floor(have)}</div>
-                <div className="mt-1 text-[#a89478]">🌿{fmtNum(cost.herb)} + 🪙{fmtNum(cost.coin)}</div>
+                <div className="mt-1 flex items-center justify-center gap-1 text-[#a89478]">
+                  <Ico name={itemSprite('herb')} className="h-3.5 w-3.5" />{fmtNum(cost.herb)}
+                  <span>+</span>
+                  <Ico name={itemSprite('coin')} className="h-3.5 w-3.5" />{fmtNum(cost.coin)}
+                </div>
                 <button onClick={() => game.craftPill(p.grade)} disabled={!canAfford}
                   className="mt-2 w-full rounded bg-dq-gold px-2 py-1 text-black disabled:opacity-30">炼制</button>
               </div>

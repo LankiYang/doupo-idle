@@ -17,21 +17,212 @@ body {
   color: #e8dcc8;
 }
 
-.dq-bg {
-  background: radial-gradient(circle at 50% 20%, #241a12 0%, #140f0b 55%, #0a0806 100%);
-}
+/* ══════════════════════════════════════════════════════════════════════════
+   焚炎异录 · 设计体系「玄墨鎏金」（v1.44）
 
-.dq-panel {
-  background: #1a1310;
-  border: 1px solid #3a2a1a;
-}
+   定调一句话：**墨为底、金为骨、火为魂**。
+   · 墨（底）  三层纵深 —— 页面 `dq-bg` / 面板 `dq-panel` / 内嵌槽 `dq-slot`
+   · 金（骨）  所有**边界**都用金：面板描边、按钮描边、分隔纹样、标题
+   · 火（魂）  所有**活的东西**都用火：可点、当前、进度、伤害
 
-.dq-text-gold {
-  color: #e8b04a;
-}
+   三条做法上的约定，改之前先读：
+   1. **一律放 `@layer components`**：`dq-*` 类此前写在 `@tailwind utilities` 之后，
+      靠源码顺序压过同优先级的工具类 —— 于是 `dq-panel border-dq-fire` 里的
+      `border-dq-fire` **一直是失效的**（面板的 `border` 简写把它盖掉了）。
+      放进 components 层后工具类重新拿到话语权，两种写法并存也对。
+   2. **面板的立体感 = 内高光 + 内暗线 + 外投影**，三层缺一不可。
+      只写外投影的面板看着像贴纸，正是"纯 CSS 画得很糙"的根源。
+   3. **不需要 `position: relative`**：材质噪点作为 `background-image` 的第一层叠上去，
+      不用伪元素 —— 给面板加 `position` 会改变其后代的绝对定位基准，是隐形的地雷。
+   ══════════════════════════════════════════════════════════════════════════ */
+@layer components {
+  /* 页面底：中心一团极淡的火光，四周压暗成晕影，让内容"浮"在墨上 */
+  .dq-bg {
+    background:
+      radial-gradient(ellipse 120% 70% at 50% 0%, rgba(255, 106, 26, 0.055) 0%, rgba(0, 0, 0, 0) 60%),
+      radial-gradient(circle at 50% 22%, #241a12 0%, #140f0b 55%, #0a0806 100%);
+  }
 
-.dq-text-dim {
-  color: #a89478;
+  /* ── 面板：全站 43 处共用，改这里 = 一次升级全站 ────────────────────── */
+  .dq-panel {
+    background-color: #1a1310;
+    background-image:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E"),
+      linear-gradient(180deg, rgba(255, 216, 150, 0.055) 0%, rgba(255, 216, 150, 0) 38%),
+      radial-gradient(130% 100% at 50% 0%, #241a13 0%, #1a1310 48%, #140e0a 100%);
+    background-blend-mode: overlay, normal, normal;
+    border: 1px solid #3a2a1a;
+    border-radius: 8px;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 214, 140, 0.13),
+      inset 0 0 0 1px rgba(8, 5, 4, 0.85),
+      0 3px 10px rgba(0, 0, 0, 0.5);
+  }
+
+  /* 内嵌槽位：输入框、空装备格、血条底 —— "凹进去"的那些地方 */
+  .dq-slot {
+    background-color: #120c09;
+    border: 1px solid #2a1e12;
+    border-radius: 6px;
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.75), inset 0 -1px 0 rgba(255, 214, 140, 0.06);
+  }
+
+  /* ── 按钮：三态写全（默认 / 悬停 / 按下 / 禁用），鎏金描边 + 顶面受光 ── */
+  .dq-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+    padding: 0.375rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid #5a4228;
+    background-image: linear-gradient(180deg, #2c2018 0%, #1c1410 100%);
+    color: #e8dcc8;
+    font-weight: 600;
+    line-height: 1.4;
+    box-shadow: inset 0 1px 0 rgba(255, 214, 140, 0.18), 0 2px 0 rgba(8, 5, 4, 0.9), 0 4px 10px -3px rgba(0, 0, 0, 0.7);
+    transition: filter 120ms ease, transform 90ms ease, box-shadow 120ms ease;
+    cursor: pointer;
+    user-select: none;
+  }
+  .dq-btn:hover:not(:disabled) { filter: brightness(1.18); border-color: #8a6a2e; }
+  .dq-btn:active:not(:disabled) { transform: translateY(1px); box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.6); }
+  .dq-btn:disabled { opacity: 0.45; cursor: not-allowed; filter: grayscale(0.5); }
+
+  .dq-btn-gold {
+    border-color: #8a6a2e;
+    background-image: linear-gradient(180deg, #5c4318 0%, #33240c 100%);
+    color: #ffd98a;
+  }
+  .dq-btn-gold:hover:not(:disabled) { border-color: #e8b04a; box-shadow: inset 0 1px 0 rgba(255, 228, 170, 0.3), 0 0 14px -3px rgba(232, 176, 74, 0.6), 0 2px 0 rgba(8, 5, 4, 0.9); }
+
+  .dq-btn-fire {
+    border-color: #b83a0e;
+    background-image: linear-gradient(180deg, #7a2c0c 0%, #421504 100%);
+    color: #ffd0a8;
+  }
+  .dq-btn-fire:hover:not(:disabled) { border-color: #ff6a1a; box-shadow: inset 0 1px 0 rgba(255, 190, 140, 0.32), 0 0 16px -3px rgba(255, 106, 26, 0.65), 0 2px 0 rgba(8, 5, 4, 0.9); }
+
+  .dq-btn-ghost {
+    border-color: #3a2a1a;
+    background-image: none;
+    background-color: rgba(0, 0, 0, 0.25);
+    color: #a89478;
+    box-shadow: none;
+  }
+  .dq-btn-ghost:hover:not(:disabled) { color: #e8dcc8; border-color: #5a4228; }
+
+  /* ── 标题：鎏金字 + 上下渐隐的金线，像卷轴题头 ────────────────────── */
+  .dq-title {
+    color: #ffd98a;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9), 0 0 12px rgba(232, 176, 74, 0.35);
+  }
+
+  /* ── 图标承台（v1.44）──────────────────────────────────────────────
+     为谁而设：装备槽、背包卡上的那四张 128² 小图（剑 / 甲 / 玉佩 / 戒指）。
+
+     它们**底色并不统一** —— 剑与甲本身画得偏暗（青灰剑身、墨色胸甲），
+     玉佩与戒指却是亮金与翡翠。四张图丢进同一块深色面板上，两张亮的一眼可见，
+     两张暗的**整块糊进背景**，玩家看到的是"这里好像没加载出来"。
+     出图侧可以重画，但那是四张既有素材、且亮的那两张本来就没问题 ——
+     真正缺的是**承台**：一块比面板亮一档的底 + 一点暖色顶光，
+     先让剪影的边缘从底上剥开，再给图本身提一点亮度与对比。
+
+     ⚠️ 不改素材、不改尺寸。图仍是 `object-cover` 满铺，承台只在图的四周露出来。 */
+  .dq-iconplate {
+    background-image:
+      radial-gradient(ellipse 78% 62% at 50% 36%, rgba(255, 216, 150, 0.16) 0%, rgba(255, 216, 150, 0) 72%),
+      linear-gradient(180deg, #2b2118 0%, #171009 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 214, 140, 0.18), inset 0 0 0 1px rgba(8, 5, 4, 0.85);
+  }
+  /* 只提亮图自身，不动承台（承台是背景，img 上的 filter 碰不到它）。
+     drop-shadow 给的是**紧跟轮廓**的一圈暗边，让暗色剪影与承台之间多一条分隔线 ——
+     相比一味加亮背景，它不会把整个格子推成一块灰。 */
+  .dq-iconplate > img {
+    filter: brightness(1.28) contrast(1.08) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+  }
+
+  /* 分隔纹样：两端渐隐的金线，中间一颗菱形 —— 比一条实线"有纹样" */
+  .dq-rule {
+    position: relative;
+    height: 1px;
+    border: 0;
+    background: linear-gradient(90deg, rgba(138, 106, 46, 0) 0%, #8a6a2e 22%, #e8b04a 50%, #8a6a2e 78%, rgba(138, 106, 46, 0) 100%);
+    opacity: 0.55;
+  }
+  .dq-rule::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 5px;
+    height: 5px;
+    transform: translate(-50%, -50%) rotate(45deg);
+    background: #e8b04a;
+    box-shadow: 0 0 6px rgba(232, 176, 74, 0.8);
+  }
+
+  /* ── 小标签（品阶、职责、状态）── */
+  .dq-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
+    padding: 0 0.3rem;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(0, 0, 0, 0.45);
+    font-size: 10px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  /* ── 通用进度/血条：外壳凹槽 + 内条带顶部高光 ────────────────────── */
+  .dq-bar {
+    overflow: hidden;
+    border-radius: 999px;
+    background-color: #120c09;
+    border: 1px solid #2a1e12;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.8);
+  }
+  .dq-bar-in {
+    height: 100%;
+    border-radius: 999px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 0 8px -2px currentColor;
+    transition: width 300ms cubic-bezier(0.2, 0.8, 0.25, 1);
+  }
+
+  /* 顶部标签页：选中态是一小片火光落在金线上 */
+  .dq-tab {
+    position: relative;
+    padding: 0.25rem 0.6rem;
+    border-radius: 6px 6px 0 0;
+    color: #a89478;
+    white-space: nowrap;
+    transition: color 140ms ease, background-color 140ms ease;
+  }
+  .dq-tab:hover { color: #e8dcc8; background: rgba(255, 216, 150, 0.05); }
+  .dq-tab-on {
+    color: #ffd98a;
+    background: linear-gradient(180deg, rgba(232, 176, 74, 0.16) 0%, rgba(232, 176, 74, 0) 100%);
+    text-shadow: 0 0 10px rgba(232, 176, 74, 0.4);
+  }
+  .dq-tab-on::after {
+    content: '';
+    position: absolute;
+    left: 12%;
+    right: 12%;
+    bottom: -1px;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, rgba(232, 176, 74, 0) 0%, #ffd98a 50%, rgba(232, 176, 74, 0) 100%);
+    box-shadow: 0 0 8px rgba(232, 176, 74, 0.85);
+  }
+
+  .dq-text-gold { color: #e8b04a; }
+  .dq-text-dim { color: #a89478; }
 }
 
 ::-webkit-scrollbar {
@@ -177,6 +368,30 @@ body {
   animation: dq-boss-pulse 1.4s ease-in-out infinite;
 }
 
+/* ── 世界 Boss 立绘的呼吸感（v1.39）────────────────────────────────────
+   立绘改成整幅插画之后，一张静止的大图看着像贴上去的墙纸。
+   `dq-idle-bob`（3px / 2.6s）是给 40px 头像做的，放在几百像素高的立绘上等于看不见；
+   这里放到 6px + 极轻微的缩放、5 秒一个来回 —— 只要"它不是一张纸"就够了，
+   **绝不能到"抖"的程度**（用户明确说过不要抖）。
+
+   ⚠️ 与受击动画**各走各的 transform**：呼吸挂在 `img` 上，受击挂在父级 wrapper 上
+   （见 WorldBossView 的 bossRef）。两者挤在同一个元素上会互相覆盖 —— 这与
+   `dq-idle-bob-flip` 那条注释是同一个坑。 */
+@keyframes dq-boss-breathe {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-6px) scale(1.008); }
+}
+.dq-boss-breathe {
+  animation: dq-boss-breathe 5s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* 用户的系统设了"减少动态效果"就一律不动。只收口在这一处，
+   不去动全站的动画 —— 那是另一个范围的决定。 */
+@media (prefers-reduced-motion: reduce) {
+  .dq-boss-breathe { animation: none; }
+}
+
 @keyframes dq-blessing-pick {
   0% { transform: scale(1); }
   40% { transform: scale(1.08); }
@@ -195,13 +410,192 @@ body {
   animation: dq-idle-bob 2.6s ease-in-out infinite;
 }
 
-/* 镜像立绘（朝左的怪物）专用：关键帧里必须带上 scaleX(-1)，
-   否则动画的 transform 会整体覆盖静态镜像，导致怪物在呼吸/受击切换时左右翻脸 */
-@keyframes dq-idle-bob-flip {
-  0%, 100% { transform: translateY(0) scaleX(-1); }
-  50% { transform: translateY(-3px) scaleX(-1); }
+/* ⚠️ 这里原本有一条 `dq-idle-bob-flip`（关键帧自带 `scaleX(-1)`），
+   用来给"用 CSS 镜像成朝左"的怪物立绘做呼吸。**v1.44 已删**：
+   32 张反派立绘的朝左现在是**烧进素材**的，`EnemySquad` 里那条静态
+   `[transform:scaleX(-1)]` 一并拿掉 —— 静态 transform 会被动画关键帧整条覆盖，
+   它正是"敌人一出手/一死亡就翻回朝右"那个 bug 的根。 */
+
+/* ── 引导呼吸灯(v1.32)─────────────────────────────────────────────────────
+   只用在引导"当前这一步"指向的那**一个**按钮上 —— 同时亮两处等于没亮,
+   所以全站任一时刻至多一个元素带这个类。
+   用 box-shadow 而不是 transform/opacity:按钮要照常可点,也不该让周围元素随呼吸挪位。 */
+@keyframes dq-breath {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(232,176,74,0.9), 0 0 5px 1px rgba(232,176,74,0.5); }
+  50% { box-shadow: 0 0 0 5px rgba(232,176,74,0.1), 0 0 16px 5px rgba(232,176,74,0.85); }
 }
-.dq-idle-bob-flip {
-  animation: dq-idle-bob-flip 2.6s ease-in-out infinite;
+.dq-breath {
+  animation: dq-breath 1.5s ease-in-out infinite;
 }
 
+
+/* ── 消消乐盘面(v1.40)────────────────────────────────────────────────────
+   盘面从"CSS grid + 每格换图"改成"绝对定位 + transform 过渡"：
+   前者交换时只能原地换 src（玩家原话「交换位置也没有动画 就图片切换」），
+   后者让**同一块**从旧格子平滑滑到新格子 —— 前提是块有身份（引擎的 Ids 层）。
+   用 transform 而不是 left/top：transform 走合成器，不触发布局与重绘，
+   在低端机上这是"卡不卡"的分水岭。
+
+   格子尺寸写死两档（36 / sm 起 40），**不用 flex/grid 自适应** ——
+   盘面高度才不会随栏宽变，这一页的布局抖动全是"某个块高度会变"引起的。 */
+.dq-m3-grid { --cs: 36px; --gap: 4px; }
+@media (min-width: 640px) { .dq-m3-grid { --cs: 40px; } }
+
+.dq-m3-tile {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transition: transform 190ms cubic-bezier(0.2, 0.8, 0.25, 1);
+}
+
+/* 块内容：入场（顶部掉下来）与消除（炸开）都在这一层做 transform，
+   与外面那层的"格子坐标"各走各的 —— 挤在同一个元素上会互相覆盖 transform。 */
+.dq-m3-in { animation: dq-m3-fall 240ms cubic-bezier(0.2, 0.8, 0.25, 1); }
+@keyframes dq-m3-fall {
+  0% { transform: translateY(-130%) scale(0.92); opacity: 0.2; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+/* ⚠️ 必须写在 .dq-m3-in **之后**：两者都是单类选择器、优先级相同，
+   靠源码顺序分胜负（消掉的那一下要盖过入场动画）。 */
+.dq-m3-pop { animation: dq-m3-pop 150ms ease-in forwards; }
+@keyframes dq-m3-pop {
+  0% { transform: scale(1); opacity: 1; }
+  55% { transform: scale(1.22); opacity: 1; }
+  100% { transform: scale(0.2); opacity: 0; }
+}
+
+/* 特殊块角标：自己一层，脉冲与入场/消除两套动画互不打扰。
+   用 SVG 画（不引素材）：横消是一根带箭头的横杠、竖消是同一根转 90°、
+   爆破是四角星 —— 形状本身就是说明，不需要配文字。 */
+.dq-m3-mark {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.dq-m3-mark-pulse { animation: dq-m3-sp 1.6s ease-in-out infinite; }
+@keyframes dq-m3-sp {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.14); }
+}
+
+/* 连击大字：**绝对定位**（不能参与布局 —— 它一出现就把盘面顶下去的话，
+   连消时整页会跟着上下弹，与右栏那条 queued 占位是同一类坑）。 */
+.dq-m3-combo {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  transform: translate(-50%, -50%);
+  font-weight: 900;
+  font-size: 20px;
+  letter-spacing: 0.05em;
+  color: #ffe9a8;
+  text-shadow: 0 0 8px rgba(232, 176, 74, 0.95), 0 2px 4px rgba(0, 0, 0, 1), 0 0 2px rgba(0, 0, 0, 1);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 20;
+  animation: dq-m3-combo 900ms cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+}
+@keyframes dq-m3-combo {
+  0% { transform: translate(-50%, -50%) scale(0.4); opacity: 0; }
+  16% { transform: translate(-50%, -50%) scale(1.28); opacity: 1; }
+  34% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  100% { transform: translate(-50%, -58%) scale(1.02); opacity: 0; }
+}
+
+/* 伤害飘字复用 dq-floating-num，只把它压到盘面里更小一号 */
+.dq-m3-dmg { font-size: 12px; color: #ffd479; top: 46%; }
+
+
+/* ── 招募抽卡(v1.43)───────────────────────────────────────────────────────
+   用户原话：「抽卡做一点抽卡动画，比如一个一个卡出来，然后抽到圣阶和准圣阶的
+   时候有特殊动画和光效。抽到圣阶可以在顶部通知公告」
+
+   ⚠️ **"一张一张出来"是纯视觉的：十张卡在第一次渲染时就全在 DOM 里**，
+   错峰只做在 `animation-delay` 上（延迟由卡序算出，写在组件的内联 style）。
+   不做"到点才挂载"的逐张挂载，是因为整站脚本都在抽完 150ms 内读
+   `document.body.innerText`（verify-shard 找「重复·转碎片」、verify-pity 找
+   「保底」角标都是这么读的）—— 逐张挂载的话那时页面上只有一两张卡，
+   一条产品没坏的断言会凭空变红。`innerText` 不看 opacity，所以文本从一开始就读得到。
+
+   `--dq-glow` 由组件按品阶配色注入。 */
+@keyframes dq-pull-in {
+  0% { transform: perspective(600px) rotateY(72deg) scale(0.72); opacity: 0; }
+  62% { transform: perspective(600px) rotateY(-10deg) scale(1.05); opacity: 1; }
+  100% { transform: perspective(600px) rotateY(0deg) scale(1); opacity: 1; }
+}
+.dq-pull-in { animation: dq-pull-in 320ms cubic-bezier(0.2, 0.8, 0.25, 1) both; }
+
+/* 圣阶 / 准圣：翻得更慢更大，并且自带光晕。两条 animation 各管一个属性
+   （进场管 transform/opacity，光晕管 box-shadow）—— 挤在一条上会互相覆盖。
+   ⚠️ 内联只写一个 `animationDelay`，CSS 的列表值会自动重复给两条用。 */
+@keyframes dq-pull-in-rare {
+  0% { transform: perspective(600px) rotateY(86deg) scale(0.5); opacity: 0; }
+  46% { transform: perspective(600px) rotateY(-14deg) scale(1.24); opacity: 1; }
+  72% { transform: perspective(600px) rotateY(6deg) scale(1.02); }
+  100% { transform: perspective(600px) rotateY(0deg) scale(1); opacity: 1; }
+}
+@keyframes dq-pull-ring {
+  0% { box-shadow: 0 0 0 0 var(--dq-glow, rgba(255, 255, 255, 0.6)); }
+  38% { box-shadow: 0 0 16px 5px var(--dq-glow, rgba(255, 255, 255, 0.6)); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+}
+.dq-pull-rare {
+  animation: dq-pull-in-rare 720ms cubic-bezier(0.2, 0.8, 0.25, 1) both,
+    dq-pull-ring 1300ms ease-out both;
+}
+
+/* 稀有卡的**常驻**内光：炸一下之后留一层不刺眼的余晖 ——
+   动画放完之后"这张是准圣/圣阶"依然一眼可辨（光效不该只在那一秒存在）。
+   基础 opacity 就是动画的终态，`prefers-reduced-motion` 关掉动画时也不会变成一片死亮。 */
+.dq-pull-halo {
+  position: absolute;
+  inset: 0;
+  opacity: 0.3;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 42%, var(--dq-glow, #fff) 0%, rgba(0, 0, 0, 0) 64%);
+  mix-blend-mode: screen;
+  animation: dq-pull-halo 1500ms ease-out both;
+}
+@keyframes dq-pull-halo {
+  0% { opacity: 0; transform: scale(0.35); }
+  30% { opacity: 1; transform: scale(1.06); }
+  70% { opacity: 0.55; transform: scale(1); }
+  100% { opacity: 0.3; transform: scale(1); }
+}
+
+/* 圣阶降临时的全屏一闪。**一次性**：随顶部公告一起挂载，动画自己收尾到 0 ——
+   所以它不需要任何"什么时候撤掉"的状态（多一个计时器就多一处能不同步的地方）。 */
+.dq-pull-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 42%, rgba(255, 232, 168, 0.62) 0%, rgba(255, 150, 90, 0.18) 45%, rgba(0, 0, 0, 0) 72%);
+  animation: dq-pull-flash 820ms ease-out both;
+}
+@keyframes dq-pull-flash {
+  0% { opacity: 0; }
+  10% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* 顶部公告：从屏幕上方滑下来。
+   ⚠️ **外层负责居中、内层负责动画** —— Tailwind 的 `-translate-x-1/2` 本身就是一条
+   transform，和滑入动画写在同一个元素上会被动画整个覆盖（公告会跳到屏幕左边去）。 */
+.dq-pull-announce {
+  animation: dq-pull-announce 420ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+@keyframes dq-pull-announce {
+  0% { transform: translateY(-140%); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+/* 用户系统设了"减少动态效果"就一律不动（与 .dq-boss-breathe 同一条规矩）。
+   `.dq-pull-flash` 直接不显示 —— 那一下白闪是这一类设置最该关掉的东西。 */
+@media (prefers-reduced-motion: reduce) {
+  .dq-pull-in, .dq-pull-rare, .dq-pull-halo, .dq-pull-announce { animation: none; }
+  .dq-pull-flash { display: none; }
+}

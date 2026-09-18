@@ -9,6 +9,7 @@
  */
 import { charLabel, fmtNum, type CombatEvent } from '../game/engine'
 import { DUTY_COLOR, DUTY_LABEL, type EnemyUnit } from '../game/data'
+import { Shield, Heart, Skull } from 'lucide-react'
 import { impactFxForRole } from '../game/fx'
 import { active, atImpact, DASH_MS, HIT_MS, DebuffBadge, ImpactFx, FloatingNumbers } from './combatFx'
 
@@ -28,35 +29,56 @@ export function EnemyCard({ enemy, now, events, sprite, small = false }: {
   // 是这个敌人在出手吗？——多单位后"谁在打我"必须能指认，否则玩家看不懂血是怎么掉的
   const isAttacking = events.some(e => e.type === 'monsterDmg' && e.from === enemy.uid && active(e, now, DASH_MS))
 
-  const box = small ? 'h-14 w-14 sm:h-16 sm:w-16' : 'h-20 w-20 sm:h-24 sm:w-24'
-  const wrap = small ? 'w-14 sm:w-16' : 'w-20 sm:w-24'
+  // v1.44：立绘从 256² 像素画换成 512² 半写实插画，卡片跟着放大一档
+  // （small 是爬塔页的紧凑档，那里一屏要放 4 层敌人）。
+  const box = small ? 'h-16 w-16 sm:h-20 sm:w-20' : 'h-24 w-24 sm:h-28 sm:w-28'
+  const wrap = small ? 'w-16 sm:w-20' : 'w-24 sm:w-28'
   const pct = enemy.maxHp > 0 ? (hp / enemy.maxHp) * 100 : 0
+  const tint = DUTY_COLOR[enemy.duty]
 
   return (
-    <div className={`relative flex shrink-0 flex-col items-center gap-0.5 ${wrap}`}>
-      <div className={`relative overflow-visible rounded border-2 bg-black/30 ${box} ${enemy.duty === 'tank' ? 'border-dq-fire' : 'border-dq-border'} ${isAttacking ? 'dq-monster-lunge' : ''}`}>
-        <div className={`h-full w-full overflow-hidden rounded ${hitting.length > 0 ? 'dq-hit-shake' : ''}`}>
+    <div className={`relative flex shrink-0 flex-col items-center gap-1 ${wrap}`}>
+      {/* 立绘底：职责色的余光从脚下往上打，再压一层暗角 ——
+          纯色方块里贴一张抠好的立绘会"飘"，有地光才有立足点。 */}
+      <div
+        className={`relative overflow-visible rounded-md border ${box} ${isAttacking ? 'dq-monster-lunge' : ''}`}
+        style={{
+          borderColor: enemy.duty === 'tank' ? '#ff6a1a' : '#3a2a1a',
+          backgroundImage: `radial-gradient(ellipse 90% 55% at 50% 100%, ${tint}44 0%, rgba(0,0,0,0) 72%), radial-gradient(120% 120% at 50% 0%, rgba(255,216,150,0.07) 0%, rgba(0,0,0,0) 55%), linear-gradient(180deg, #1c1410 0%, #0c0806 100%)`,
+          boxShadow: `inset 0 1px 0 rgba(255,214,140,0.14), inset 0 0 0 1px rgba(8,5,4,0.9), 0 3px 10px rgba(0,0,0,0.55)${alive ? `, 0 0 12px -4px ${tint}66` : ''}`,
+        }}>
+        <div className={`h-full w-full overflow-hidden rounded-md ${hitting.length > 0 ? 'dq-hit-shake' : ''}`}>
           {sprite ? (
+            /* ⚠️ **这里绝不能再加 `[transform:scaleX(-1)]`**。
+               v1.44 起 32 张反派立绘的「朝左」是**烧进素材里**的（生图时就是严格左侧身），
+               而 CSS 的静态 transform 会被任何一条动画的关键帧整条覆盖 ——
+               原先 `dq-monster-lunge`（出手）与 `dq-death-fade`（死亡）的关键帧里
+               都没有 `scaleX(-1)`，于是敌人每次出手、死亡的瞬间会当场翻回朝右。
+               「定位交给外层、动画交给内层」是同一个坑的通用解，见 index.css 顶部第 3 条。 */
             <img src={sprite} alt={enemy.name}
-              className={`h-full w-full object-contain [transform:scaleX(-1)] ${alive && !isAttacking ? 'dq-idle-bob-flip' : ''} ${!alive ? 'dq-death-fade' : ''}`} />
+              className={`h-full w-full object-contain ${alive && !isAttacking ? 'dq-idle-bob' : ''} ${!alive ? 'dq-death-fade' : ''}`} />
           ) : (
-            <div className="flex h-full items-center justify-center text-2xl">{enemy.duty === 'tank' ? '🛡' : enemy.duty === 'healer' ? '💚' : '👹'}</div>
+            <div className="flex h-full items-center justify-center" style={{ color: tint }}>
+              {/* 兜底：素材键与产物不同步时（新加了怪却没出图）绝不能留白。
+                  用职责图标而不是 emoji —— 至少颜色还对得上职责色，一眼能读出"对面这块是谁" */}
+              {enemy.duty === 'tank' ? <Shield size={28} /> : enemy.duty === 'healer' ? <Heart size={28} /> : <Skull size={28} />}
+            </div>
           )}
         </div>
         {hitting.length > 0 && <ImpactFx src={impactFxForRole(hitterRole ?? 'melee')} rotate={hitting.length % 2 === 0 ? -18 : 12} />}
         <FloatingNumbers events={hits} refMax={enemy.maxHp} now={now} />
         {/* 职责徽章：敌方也分坦克/战斗/医师（30 关起会出现敌方的医师），
             开战前就能看清对面谁扛谁奶 —— 这正是决定"先啃哪块骨头"的情报 */}
-        <span className="absolute -left-1 -top-1 rounded px-1 text-[9px] leading-4 text-black"
-          style={{ background: DUTY_COLOR[enemy.duty] }}>
+        <span className="dq-chip absolute -left-1 -top-1 font-semibold"
+          style={{ color: '#0c0806', background: tint, borderColor: 'rgba(0,0,0,0.4)' }}>
           {DUTY_LABEL[enemy.duty]}
         </span>
         {/* 我方控制减益打上去的标记：让"我这几个角色到底在干嘛"看得见 */}
         {enemy.debuff && <DebuffBadge className="-right-1 -top-1" />}
       </div>
       <div className="w-full truncate text-center text-[9px] text-[#a89478] sm:text-[10px]">{enemy.name}</div>
-      <div className="h-1.5 w-full rounded bg-black/40">
-        <div className="h-1.5 rounded bg-dq-fire transition-[width] duration-300 ease-out" style={{ width: `${pct}%` }} />
+      <div className={`dq-bar h-1.5 w-full ${!alive ? 'opacity-40' : ''}`}>
+        <div className="dq-bar-in bg-dq-fire" style={{ width: `${pct}%`, color: '#ff6a1a' }} />
       </div>
     </div>
   )
@@ -97,9 +119,9 @@ export function EnemyTotalBar({ enemies }: { enemies: EnemyUnit[] }) {
         <span>敌方 {alive}/{enemies.length}</span>
         <span>{fmtNum(hp)} / {fmtNum(max)}</span>
       </div>
-      <div className="h-3 rounded bg-black/40">
-        <div className="h-3 rounded bg-dq-fire transition-[width] duration-300 ease-out"
-          style={{ width: `${max > 0 ? (hp / max) * 100 : 0}%` }} />
+      <div className="dq-bar h-3">
+        <div className="dq-bar-in bg-gradient-to-b from-[#ffb066] to-[#b83a0e]"
+          style={{ width: `${max > 0 ? (hp / max) * 100 : 0}%`, color: '#ff6a1a' }} />
       </div>
     </div>
   )

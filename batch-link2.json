@@ -1,0 +1,12 @@
+[
+  {
+    "name": "韩立",
+    "out": "characters/hanli.png",
+    "prompt": "square composition, 1:1 aspect ratio, Han Li, the protagonist of A Record of a Mortal's Journey to Immortality, a young male cultivator of deliberately unremarkable plain looks, slightly tanned dark skin, ordinary but deep and calculating eyes, wearing a plain dark teal-green Chinese hanfu wide-sleeved robe with simple cloth sash, holding a small emerald bamboo sword in one hand, faint azure sword qi and tiny golden spirit-insect lights swirling around him, cautious composed expression. ultra-detailed refined texture, semi-realistic anime illustration, bust portrait, centered composition, cinematic rim lighting, Chinese xianxia cultivation fantasy theme, simple dark gradient background, intricate clothing folds, game gacha splash art quality, masterpiece"
+  },
+  {
+    "name": "银月",
+    "out": "characters/yinyue.png",
+    "prompt": "square composition, 1:1 aspect ratio, Yin Yue, an ethereal female cultivator from A Record of a Mortal's Journey to Immortality, long flowing silver-white hair, a delicate crescent moon mark on her forehead, pale silver-white and moon-blue layered hanfu robe with flowing ribbons, cold elegant breathtaking beauty with faint demonic wolf-spirit aura, moonlight halo behind her, serene aloof expression. ultra-detailed refined texture, semi-realistic anime illustration, bust portrait, centered composition, cinematic rim lighting, Chinese xianxia cultivation fantasy theme, simple dark gradient background, intricate clothing folds, game gacha splash art quality, masterpiece"
+  }
+]

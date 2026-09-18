@@ -37,8 +37,11 @@ export const REWARDS_URL = `${import.meta.env.BASE_URL}rewards/rewards.json`
  * - 键必须在 ITEM_INFO 里。写成 tanhuang/缘分丹 这种键名，客户端加了数字也永远不会显示，
  *   属于"看着发了其实没有"，宁可在校验阶段整条丢掉。
  * - 负数/0 会让玩家掉资源、小数会让库存出现 0.5 个丹，一律不接受。
+ *
+ * v1.42 起也给了 activities.ts 用 —— **活动的奖励与运营奖励校验同一套**，
+ * 两边各写一份的话，某天加了个新物品只会有一边认，那种不一致排查起来最费劲。
  */
-function sanitizeItems(raw: unknown): Record<string, number> | null {
+export function sanitizeItems(raw: unknown): Record<string, number> | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const src = raw as Record<string, unknown>
   const keys = Object.keys(src)

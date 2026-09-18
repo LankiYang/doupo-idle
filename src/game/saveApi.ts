@@ -2,11 +2,9 @@
 // 安全要点：上传只读本地、不改本地；恢复前先把当前本地存档备份到 .bak，再写回并 reload，
 // 走已加固的 load()/migrate() 校验——云端数据万一损坏会自动回退到 .bak，杜绝死档。
 import { getPlayerId } from './leaderboardApi'
+import { SAVE_KEY, SAVE_BAK_KEY as BAK_KEY, SAVE_META_KEY as META_KEY } from './storageKeys'
 
 const API = `${import.meta.env.BASE_URL}api`
-const SAVE_KEY = 'doupo-idle-save-v1'
-const BAK_KEY = 'doupo-idle-save-v1.bak'
-const META_KEY = 'doupo-idle-cloud-meta'
 
 export interface CloudMeta { lastUpload: number; lastHash: string }
 export interface CloudSave { data: string; updatedAt: number }

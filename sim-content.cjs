@@ -85,8 +85,18 @@ const labDaolingReward = f => { const b = Math.floor(2 + f * 0.6); return isLabB
 
 // ── 复刻 engine.ts ──
 const ROUND_SEC = 2
+// 星级系数：镜像 src/game/data.ts 的 starMultOf（唯一权威在那儿）。
+// v1.34：每星加成 8/6/4/3/2% 逐档递减 + 跨档 +10%；跃升次数取 clamp(floor(s/10),0,4)。
+const starMult = (s) => {
+  const t = Math.min(4, Math.max(0, Math.floor(s / 10)))
+  const per = [0.08, 0.06, 0.04, 0.03, 0.02]
+  let g = 0
+  for (let i = 0; i < t; i++) g += 10 * per[i]
+  g += (s - t * 10) * per[t]
+  return 1 + g + 0.1 * t
+}
 function charStats(entry, cd, fire) {
-  const lv = entry.level, sm = 1 + entry.stars * 0.08
+  const lv = entry.level, sm = starMult(entry.stars)
   let atk = (cd.baseAtk + cd.atkGrowth * lv) * sm
   let d = (cd.baseDef + cd.defGrowth * lv) * sm
   let hp = (cd.baseHp + cd.hpGrowth * lv) * sm

@@ -1,0 +1,27 @@
+[
+  {
+    "name": "火灵珠",
+    "out": "gems/elem_fire.png",
+    "prompt": "A single glowing fire element crystal gem, hexagonal faceted jewel, molten crimson core with bright orange flame energy swirling inside, tiny ember sparks trapped within the crystal, strong warm rim light inside the jewel, glossy polished surface, isometric front view, isolated on a plain pure white background, no drop shadow, no outer glow, perfectly centered, mobile match-3 puzzle game gem icon, high contrast, vibrant saturated colors, crisp clean edges, Chinese xuanhuan cultivation fantasy theme, square composition, 1:1 aspect ratio, game asset, centered composition"
+  },
+  {
+    "name": "木灵珠",
+    "out": "gems/elem_wood.png",
+    "prompt": "A single glowing wood element crystal gem, hexagonal faceted jewel, emerald green core with luminous jade leaf energy swirling inside, faint mossy light and tiny floating leaves trapped within the crystal, cool green rim light inside the jewel, glossy polished surface, isometric front view, isolated on a plain pure white background, no drop shadow, no outer glow, perfectly centered, mobile match-3 puzzle game gem icon, high contrast, vibrant saturated colors, crisp clean edges, Chinese xuanhuan cultivation fantasy theme, square composition, 1:1 aspect ratio, game asset, centered composition"
+  },
+  {
+    "name": "水灵珠",
+    "out": "gems/elem_water.png",
+    "prompt": "A single glowing water element crystal gem, hexagonal faceted jewel, deep azure blue core with swirling liquid energy and tiny bubbles inside, cool cyan rim light inside the jewel, glossy polished surface, isometric front view, isolated on a plain pure white background, no drop shadow, no outer glow, perfectly centered, mobile match-3 puzzle game gem icon, high contrast, vibrant saturated colors, crisp clean edges, Chinese xuanhuan cultivation fantasy theme, square composition, 1:1 aspect ratio, game asset, centered composition"
+  },
+  {
+    "name": "土灵珠",
+    "out": "gems/elem_earth.png",
+    "prompt": "A single glowing earth element crystal gem, hexagonal faceted jewel, amber golden core with swirling sand and cracked stone energy inside, warm ochre light inside the jewel, glossy polished surface, isometric front view, isolated on a plain pure white background, no drop shadow, no outer glow, perfectly centered, mobile match-3 puzzle game gem icon, high contrast, vibrant saturated colors, crisp clean edges, Chinese xuanhuan cultivation fantasy theme, square composition, 1:1 aspect ratio, game asset, centered composition"
+  },
+  {
+    "name": "灵阵盘面底纹",
+    "out": "gems/board_plate.png",
+    "prompt": "A dark mystical formation array plate, ancient Chinese rune circle engraved on deep charcoal stone, faint dim amber glowing rune lines radiating from the center, top-down view, uniform very dark background, subtle and low contrast, no bright highlights, no characters, seamless game UI panel background texture, square composition, 1:1 aspect ratio, Chinese xuanhuan cultivation fantasy theme"
+  }
+]

@@ -217,6 +217,14 @@ export const CHARACTERS: CharacterDef[] = [
   def('moshou_trapper', '魔兽山脉捕兽人', 'yellow', 'back', 'single', '布陷阱的手艺，比斗气更可靠'),
   def('desert_escort', '沙漠商队护卫', 'yellow', 'front', 'tank', '随驼队走遍大漠，见惯了刀光——护卫的本分是站在货前面'),
   def('hanyue', '寒月', 'yellow', 'back', 'heal', '游方医师，一囊草药可救半条命'),
+
+  // ─ v1.41 联动：凡人修仙传（**限时**，见下方 LINK_* 常量）─────────────────────
+  // ⚠️ 这两名与其他角色有一处不同：**只在活动期内可获取**。活动结束后从抽卡池与兑换区
+  //    一起移出（收口在 recruitPoolOf / redeemShard），已经拥有的永久保留。
+  //    属性照旧由 def() 算出，同品阶同定位与其他角色完全一致 —— 联动不做数值优势。
+  //    定位是补圣阶的两块空缺：圣阶原本没有单体（single）也没有单体医师（heal）。
+  def('hanli', '韩立', 'sheng', 'back', 'single', '凡人修仙传联动 · 一介凡人，步步为营，青竹蜂云剑下从无侥幸'),
+  def('yinyue', '银月', 'sheng', 'back', 'heal', '凡人修仙传联动 · 银月狼族，月华入体，只为一人疗伤'),
 ]
 
 export const ROLE_INFO = ROLE_LABEL
@@ -479,6 +487,65 @@ export function labDaolingReward(floor: number): number {
   return isLabBoss(floor) ? base * 2 : base
 }
 
+// ─ 论道令商店价目（v1.35 补齐 8 品阶）──────────────────────────────────────
+//
+// **唯一权威**：界面显示与引擎扣费都读这一处。原先 `grade * 15` 在 LabView.tsx 和
+// engine.ts 里**各写了一遍**，且商店只挂 1/3/5 品 —— 于是卡在 6/7/8 品突破点上的人
+// 在论道令商店里买不到任何能用的东西。两份实现必然漂，这次收口。
+//
+// 定标依据：**论道令只在首通新层时发放**（engine 的 isFirstClear 分支），是终身一次性
+// 资源、不是可刷的，所以价目必须按「终身总量」倒推 —— 而不是看着差不多就写个数：
+//
+//     首通到 30 层 → 累计  402 令      首通到 50 层 → 累计 1030 令
+//     首通到 78 层 → 累计 2363 令（线上最高层）
+//
+// 曲线取 ×2 等比（与炼丹房 pillCraftCost 的 ×2 同形），基价 8，于是：
+//   · 30 层玩家（402）能补齐到 5~6 品，**摸不到 7/8 品** —— 留出上升空间
+//   · 50 层玩家（1030）**刚好换一颗 8 品**（1024），是个记得住的里程碑
+//   · 78 层玩家（2363）能换 8 品 ×2
+//
+// ⚠️ 定位：论道令商店是**救急通道**，不是丹药的主来源。一个有 30 名角色的玩家一辈子要
+//    360 颗丹药（每人 12 颗），终身论道令只够买其中一小部分 —— 这是**刻意**的，
+//    主来源是炼丹房（灵药+灵金、可无限刷）。若把论道令定到能批量供货，炼丹房就废了。
+//
+// ⚠️ 低品阶便宜**没有风险**：每个品阶的终身需求有天然上限。
+//    每个大境界卡一次突破，12 个境界的 pillGrade 依次是
+//    1,2,3,3,4,4,5,5,6,7,7,8 ⇒ 每名角色终身需要
+//    1 品×1、2 品×1、3 品×2、4 品×2、5 品×2、6 品×1、7 品×2、8 品×1（合计 12 颗）。
+//    买超了也只是囤着，不会挤出任何别的东西。
+export const LAB_PILL_BASE_COST = 8
+
+/** 论道令商店：某品阶丹药的单价（grade 从 1 起；未定义品阶返回 Infinity，闸门在引擎） */
+export function labPillCost(grade: number): number {
+  const pill = PILLS.find(p => p.grade === grade)
+  if (!pill) return Number.POSITIVE_INFINITY
+  return LAB_PILL_BASE_COST * Math.pow(2, pill.grade - 1)
+}
+
+/** 论道令商店：武魂精血一档的价与量（同样收口，界面不再自己写一遍数字） */
+export const LAB_ESSENCE_COST = 10
+export const LAB_ESSENCE_AMOUNT = 20
+
+/**
+ * 论道令商店：灵药一档的价与量（2026-09-17 用户定：「论道商店允许购买灵药」）。
+ *
+ * ⚠️ **这一档有一条硬约束：1 令换到的灵药不能超过 ≈7.5 个**，否则「买灵药 → 炼丹房合成」
+ *    会全面优于「直接买丹药」，128 令的 5 品丹、1024 令的 8 品丹就没人再买了 —— 而
+ *    「终身论道令只够买一小部分丹药、丹药主来源是炼丹房」正是这个商店的定标前提（见上）。
+ *    推导：1 品丹直购 `labPillCost(1) = 8 令`，炼一颗只要 `pillCraftCost(1).herb = 60 灵药`
+ *    ⇒ 两条路等价当且仅当 60 / r = 8，即 **r = 7.5**。高于它，灵药路线反超。
+ *    （炼丹还要额外花灵金，所以 r = 7.5 时直购仍严格更优。）
+ *
+ * 取 **r = 5**（本档 500 / 100），留出安全边际：炼一颗 1 品丹要 12 令，直购只要 8 令。
+ * 参照物是精血那档（10 令 → 20 精血）。灵药比精血好刷得多（`herbPerSec = 0.3 + 角色数×0.05`
+ * ⇒ 20 名角色约 4680/h；精血实测 228~342/h），所以换算成"买到的挂机时长"这一档是偏紧的 ——
+ * **这是刻意的**：它是给溢出论道令的回收口，不是灵药的主来源（主来源永远是药园挂机）。
+ *
+ * 想调价只改这两个数，别去引擎或界面里再写一份（两份实现必然漂，见上面那段教训）。
+ */
+export const LAB_HERB_COST = 100
+export const LAB_HERB_AMOUNT = 500
+
 export type BlessingCategory = 'offense' | 'defense' | 'economy'
 
 export interface BlessingDef {
@@ -705,6 +772,7 @@ export function enemyUnitsForFloor(floor: number): EnemyUnit[] {
 export type FactionId =
   | 'yunlan' | 'xiao' | 'jiama' | 'moshou' | 'gu'
   | 'long' | 'hundian' | 'fenyangu' | 'danta' | 'sanxiu'
+  | 'fanren'
 
 export interface FactionTier {
   /** 需要几名同阵营角色同时上阵才触发 */
@@ -802,6 +870,14 @@ export const FACTIONS: Record<FactionId, FactionDef> = {
       { count: 6, atk: 14, def: 14, hp: 14, desc: '全体攻击/防御/气血 +14%' },
     ],
   },
+  // 联动阵营（v1.41）：只有两名成员，所以**只有 2 人档**——两名人都在队里才生效。
+  // 加成给到 8%（与散修 5 人档同值）：门槛是"两个位子都给联动角色"，条件比任何阵营都硬。
+  fanren: {
+    id: 'fanren', name: '凡人修仙', color: '#5eead4', motto: '步步为营',
+    tiers: [
+      { count: 2, atk: 8, hp: 8, desc: '全体攻击/气血 +8%' },
+    ],
+  },
 }
 
 /**
@@ -836,6 +912,8 @@ export const FACTION_OF: Record<string, FactionId> = {
   yellow_bandit: 'sanxiu', luoxuan: 'sanxiu', wuang: 'sanxiu', zhayi: 'sanxiu',
   linmeiniang: 'sanxiu', yuntianhe: 'sanxiu', tuoshe: 'sanxiu', linxiuya: 'sanxiu',
   liuling: 'sanxiu', wuhao: 'sanxiu', tieyan: 'sanxiu', desert_escort: 'sanxiu',
+  // 凡人修仙（v1.41 联动）：自成一派，两名都上阵才触发羁绊
+  hanli: 'fanren', yinyue: 'fanren',
 }
 
 /** 已上阵的某个阵营：人数与当前生效的档位（未达最低档时 tier 为 null） */
@@ -897,9 +975,9 @@ export const ITEM_INFO: Record<string, { name: string; icon: string }> = {
   ...Object.fromEntries(PILLS.map(p => [p.id, { name: p.name, icon: p.icon }])),
 }
 
-// ── 升星：每 10 星一个品质档（v1.28.9 重做，见下方常量块） ──────────────────────────────────
+// ── 升星：每 10 星一个品质档（v1.28.9 重做、v1.34 按实测产出重定标，见下方常量块） ──────────────────────────────────
 // 原设计上限 5★ 且仅需 225 精血/角色，实测第 1 天就满星 —— 那段沿革已并入下方常量块。
-// ── 升星常量（v1.28.9 重做：每 10 星一个品质档，共 5 档）────────────────────
+// ── 升星常量（v1.28.9 重做、v1.34 重定标：每 10 星一个品质档，共 5 档）────────────────────
 //
 // 沿革：v1.7 上限 5★ 且只要 225 精血，第 1 天就满星、精血与玄晶双双溢出报废，于是把上限提到 10★。
 // v1.28.9 又重演了同一件事 —— 线上 22 份云存档里 26/257 个角色已满 10★（5 名玩家手里有满星角色），
@@ -907,11 +985,23 @@ export const ITEM_INFO: Record<string, { name: string; icon: string }> = {
 // **根因不是"上限太小"，是每一档的成本太平** —— 所以这次不是单纯拉长，而是把成本按档拉开：
 //
 //   · 1~10★   成本与属性一分不动（老档既有进度不作废、已满 10★ 的角色只会更强不会更弱）
-//   · 11★ 起  每档的每星价是上一档的 3 倍，用玄晶（它只有装备分解一个来源，约 9~60/h）
+//   · 11★ 起  每档的每星价是上一档的 3 倍，用玄晶
 //
 // 档位按「**每满 10 星提升一个品质**」划分：0~9 铜 / 10~19 银 / 20~29 金 / 30~39 赤 / 40~50 彩。
-// 跨档时属性再给一次 +10% 跃升，让"品质提升"不只是换个颜色。按当前产出，练满一个角色
-// 约需 500 小时挂机（3.2 万玄晶），作为终局长期目标。
+// 跨档时属性再给一次 +10% 跃升，让"品质提升"不只是换个颜色。
+//
+// **v1.34 重定标：上面那版的产出分母是错的。**
+// v1.28.9 按「玄晶只有装备分解一个来源、6~9/h（首领关速刷约 60/h）」把 50★ 定成 3.2 万玄晶
+// ≈ 500 小时。实测（`temp/measure-xuanjing.cjs`，真引擎 + 时钟加速 50×，中州普通关碾压
+// 895 杀/h）真实产出是**约 154 玄晶/h** —— 怪物表直接掉落 141.6/h + 装备分解 12/h。
+// 那个估算**只算了装备分解，漏掉了中州 `drops` 里每杀 12%×1~2 颗的直接掉落**，
+// 低估 17~26 倍，于是"500 小时终局"实际只有约 **200 小时**、0→10★ 更是只要 1 小时。
+//
+// 这一版两个都按实测重定：
+//   · 价格  11★ 起每星 **200 / 600 / 1800 / 5400**（档内恒定、每档 ×3）⇒ 升满累计
+//           **8 万玄晶 ≈ 520 小时**，回到"终局长期目标"的原意
+//   · 加成  每星 **8% / 6% / 4% / 3% / 2%** 逐档递减。原先恒定 8% 而成本每档 ×3，
+//           等于后期花 27 倍的价钱买同一份加成；递减后 50★ 从 ×5.40 落到 **×3.70**
 export const MAX_STARS = 50
 export const STAR_ESSENCE_CAP = 5
 /** 每档 10 星 */
@@ -932,8 +1022,10 @@ export const STAR_TIERS: StarTier[] = [
   { name: '彩星', color: '#d946ef' },
 ]
 
-/** 11★ 起每档的**每星**玄晶价，索引 = 档位−1（银/金/赤/彩），每档 ×3 */
-export const STAR_TIER_XUANJING = [80, 240, 720, 2160]
+/** 11★ 起每档的**每星**玄晶价，索引 = 档位−1（银/金/赤/彩），每档 ×3。v1.34 按实测产出重定标 */
+export const STAR_TIER_XUANJING = [200, 600, 1800, 5400]
+/** 每档的**每星**属性加成，索引 = 档位（铜/银/金/赤/彩）。v1.34 起逐档递减，见上方常量块 */
+export const STAR_TIER_PER_STAR = [0.08, 0.06, 0.04, 0.03, 0.02]
 /** 每跨过一个品质档，属性额外 +10%（10★ 的角色因此比旧版更强，不会更弱） */
 export const STAR_TIER_JUMP = 0.1
 
@@ -951,12 +1043,20 @@ export function starTierOf(stars: number): StarTier {
  * 星级系数。**这是唯一的星级属性口径** —— 面板、战斗、战力评分都走它，
  * 别在别处再拼一个 `1 + stars * 0.08`（v1.21.4 那次"升星面板不涨属性"就是两份实现打架）。
  *
+ * 每星加成**逐档递减**（`STAR_TIER_PER_STAR`），跨档再吃一次 `STAR_TIER_JUMP`。
+ * 递减是为了让"每点属性的单价"随档位单调上升 —— 原先恒定 8% 而价格每档 ×3，
+ * 后期花 27 倍价钱买同一份加成，性价比是断崖。
+ *
  * 跃升次数取 `starTierIndex` 而不是 `floor(stars/10)`：后者在 50★ 会给第 6 次跃升，
  * 而颜色只到第 5 档（50★ 是彩星档的圆满、不是新的一档），两条口径必须同源。
  */
 export function starMultOf(stars: number): number {
   const s = Number.isFinite(stars) ? Math.max(0, Math.min(MAX_STARS, Math.floor(stars))) : 0
-  return 1 + s * 0.08 + STAR_TIER_JUMP * starTierIndex(s)
+  const tier = starTierIndex(s)
+  let gain = 0
+  for (let i = 0; i < tier; i++) gain += STARS_PER_TIER * STAR_TIER_PER_STAR[i]
+  gain += (s - tier * STARS_PER_TIER) * STAR_TIER_PER_STAR[tier]
+  return 1 + gain + STAR_TIER_JUMP * tier
 }
 
 export function starUpCost(stars: number): { item: 'essence' | 'xuanjing'; amount: number } {
@@ -994,6 +1094,66 @@ export const SHARD_COST: Record<Rarity, number> = {
   yellow: 2, xuan: 4, di: 8, tian: 16, quasi: 30, sheng: 60,
 }
 
+// ── 限时联动（v1.41 · 凡人修仙传）─────────────────────────────────────────
+/**
+ * 活动期内这两名武魂进抽卡池、可兑换；**结束后从这两处一起移出**（已拥有的永久保留）。
+ *
+ * ⚠️ 时间窗是**全服统一的绝对时刻**，不是"每个玩家各自的 24 小时"：公告上要写得出一个
+ *    确定的截止时间，全服才在同一件事上。改期只改 `LINK_START_MS` 一行。
+ *
+ * ⚠️ 判定读的是**客户端时钟**（`Date.now()`）。本项目没有"服务端下发时间"的通道，
+ *    而抽卡本来就是纯客户端的（缘分丹与保底都在本地存档里）。把手机时间调回活动期的人
+ *    能继续抽到联动角色 —— 已知并接受：这是单机放置游戏，他得自己改系统时间；
+ *    要堵这个口就得把抽卡搬到服务端，代价远大于收益。
+ */
+export const LINK_CHAR_IDS = ['hanli', 'yinyue']
+/** 联动兑换价：**固定 100 枚**（不随品阶走），用户点名的数字。 */
+export const LINK_SHARD_COST = 100
+/** 活动起始时刻（毫秒时间戳）。**部署上线时写入**；`<= 0` 视为"未开活动"。 */
+export const LINK_START_MS = Date.UTC(2026, 8, 17, 17, 0) // 2026-09-18 01:00 (UTC+8)
+/** 活动时长：24 小时 */
+export const LINK_DURATION_MS = 24 * 3600 * 1000
+
+export function linkEndMs(): number { return LINK_START_MS + LINK_DURATION_MS }
+/** 活动是否进行中。`now` 可注入 —— 测试要能把时钟拨到活动前 / 活动后（界面一律用默认值）。 */
+export function linkActive(now: number = Date.now()): boolean {
+  return LINK_START_MS > 0 && now >= LINK_START_MS && now < linkEndMs()
+}
+export function isLinkChar(id: string): boolean {
+  return LINK_CHAR_IDS.includes(id)
+}
+/** 剩余时间（活动未开始或已结束时为 0） */
+export function linkRemainMs(now: number = Date.now()): number {
+  // 只在活动期内给正数：活动还没开始时按「结束时刻 - 现在」算会得到 24 小时出头，
+  // 调用方拿它做倒计时就会显示成"活动已开、还剩 24 小时"，是个会骗人的数。
+  return linkActive(now) ? Math.max(0, linkEndMs() - now) : 0
+}
+/**
+ * 兑换价：联动角色固定 100 枚，其余按品阶。
+ * **引擎与界面都必须走这一个函数** —— 两处各算一遍迟早分叉，这个项目已经栽过三次。
+ */
+export function shardCostOf(c: CharacterDef): number {
+  return isLinkChar(c.id) ? LINK_SHARD_COST : SHARD_COST[c.rarity]
+}
+/**
+ * 某个品阶**当前**的抽卡池。联动角色只在活动期内进池子。
+ * 抽卡一律走这里、不要自己 `CHARACTERS.filter` —— 那是"活动结束后还能抽到联动角色"的唯一来源。
+ */
+export function recruitPoolOf(rarity: Rarity, now: number = Date.now()): CharacterDef[] {
+  const active = linkActive(now)
+  return CHARACTERS.filter(c => c.rarity === rarity && (active || !isLinkChar(c.id)))
+}
+/**
+ * 联动角色**未拥有、且当前拿不到**时给玩家看的那句话。
+ * 分两种措辞是因为"活动开始前"说"已结束"是假话 —— 图鉴里随时能点到这两张卡，
+ * 而活动前后都是拿不到的（红线⑩：给玩家的话必须如实）。
+ */
+export function linkClosedText(now: number = Date.now()): string {
+  return now < LINK_START_MS
+    ? '限时联动尚未开启 · 这名武魂暂不可获得'
+    : '限时联动已结束 · 这名武魂暂不可获得'
+}
+
 // ─ 抽卡保底：三层，抽到「该层或更高」即重置该层计数 ──────────────────────
 // 定数依据：缘分丹是抽卡唯一货币，产出只有「主线每 5 关首领首通 1 颗 + 每 25 关额外 2 颗」，
 // 实测线上存档（pityRare 只在触发时归零，所以它直接等于终身抽数）玩家终身只有 26~71 抽。
@@ -1001,7 +1161,7 @@ export const SHARD_COST: Record<Rarity, number> = {
 // 而且它 60% 概率掉天阶，就算攒到也是白攒。三层数字都按「终身 40~70 抽」这个量级定。
 export const PITY_TIAN = 10     // 每 10 抽必出天阶+：消除「十连全白」的挫败
 export const PITY_QUASI = 30    // 每 30 抽必出准圣+：55 关玩家终身 40 颗，坚持抽就一定拿得到
-export const PITY_SHENG = 60    // 每 60 抽必出圣阶：54 名角色里有 6 个圣阶，保持「玩到后期的里程碑」定位
+export const PITY_SHENG = 60    // 每 60 抽必出圣阶：54 名常驻里有 6 个圣阶（联动期另有 2 名限时进池），保持「玩到后期的里程碑」定位
 /** 天阶保底抽的升格概率：保底也留点惊喜，不是每次都卡着最低档给 */
 export const PITY_TIAN_UPGRADE = 0.1
 
@@ -1079,7 +1239,13 @@ export function charInvestment(level: number, xp: number, stars: number): CharIn
 // 词条可以用"+11 攻击力"这种绝对数值。咱们的角色数值有 REALM_POWER 乘法加成，
 // 同一件装备穿在 10 级和 1000 级角色身上如果给固定数值，要么毫无意义要么严重超模。
 // 所以全部词条改为百分比加成（挂在 charStats 的加成层，和异火同一套叠加逻辑），
-// 装备本身不再需要"装备等级"和角色等级绑定计算——纯粹看品阶决定词条数值范围与条数。
+// **词条数值的基准完全由品阶决定**，不看角色等级。
+//
+// v1.38 起装备有自己的**强化等级 `lv`**（用户："装备新增装备升级功能…装备等级要在外部外显"）。
+// 它与上面那条取舍并不冲突：强化是给**这件装备的词条**乘一个系数（见 EQUIP_ENHANCE），
+// 不是把词条改成"随角色等级缩放的绝对数值"——所以同一件 +12 天阶穿在 10 级和 1000 级角色身上
+// 依然是同一个百分比加成，超模风险一个字都没多。
+// 早期那版注释写的是"装备本身不再需要装备等级"，指的是**不要角色等级绑定**那件事，别误读成"永远不做强化"。
 
 export type EquipSlot = 'weapon' | 'armor' | 'accessory' | 'ring'
 export type AffixType = 'atkPct' | 'defPct' | 'hpPct' | 'critRate' | 'critDmg'
@@ -1121,7 +1287,14 @@ export const EQUIP_QUALITY_WEIGHT: Record<Rarity, number> = {
 
 /** roll 是这条词条的"品质位"：自然掉落恒在 [0,1)，洗练后**可以超过 1**（见 EQUIP_REFORGE） */
 export interface EquipAffix { type: AffixType; value: number; roll: number }
-export interface EquipItem { id: string; slot: EquipSlot; quality: Rarity; name: string; innate: EquipAffix; extra: EquipAffix[] }
+/**
+ * `lv` 是 v1.38 的**强化等级**（0 ~ 该品阶的上限，见 EQUIP_ENHANCE）。
+ *
+ * ⚠️ 它必须由 `sanitizeEquipItem` 兜底成 0 —— v1.38 之前掉落的每一件装备都没有这个字段，
+ * 而 `equipAffixSum` 在渲染路径上，缺字段时一旦算出 NaN 就是白屏。**不加字段改不了需求，
+ * 但"缺字段不能死档"是红线**：所有读取处一律走 `equipEnhMult`（它对非有限值返回 1 倍）。
+ */
+export interface EquipItem { id: string; slot: EquipSlot; quality: Rarity; name: string; innate: EquipAffix; extra: EquipAffix[]; lv: number }
 
 function rollAffix(type: AffixType, statMult: number): EquipAffix {
   const roll = Math.random()
@@ -1187,6 +1360,23 @@ export function rollReforgedAffix(quality: Rarity): EquipAffix {
   return { type, value: +((r.base + roll * r.span) * EQUIP_QUALITY[quality].statMult).toFixed(1), roll }
 }
 
+/**
+ * 「洗练可换回」的适用面：**最高阶（圣阶）的武器**。
+ *
+ * 用户要求：「最高阶的武器洗练允许玩家保留旧的还是选择新的，两个在一起对比，做一个这个机制」。
+ * 落地的语义是**默认采用新结果 + 给一次换回原词条的机会**，而不是"没选就不生效"：
+ * 洗练是玩家会连点的动作，每洗一条都卡一个必须确认的弹窗，会把连洗变成折磨；
+ * 而圣阶武器的洗练单价 20 万灵金、洗出想要的那条期望约 15 次（见 EQUIP_REFORGE 的注释），
+ * 一次手滑洗掉一条极品词条是这个游戏里最贵的一种不可逆 —— 所以才给它一次反悔。
+ *
+ * **只在最高阶武器上开**：低阶装备本来就该被洗掉或分解，多一步选择只是负担。
+ * 判定收口在这一个函数里：将来要扩到"所有圣阶装备"或"所有装备"，只改这一处；
+ * 引擎与组件都不许自己判 `quality`/`slot`（两份口径迟早分叉）。
+ */
+export function canUndoReforge(item: { quality: Rarity; slot: EquipSlot } | null | undefined): boolean {
+  return !!item && item.quality === 'sheng' && item.slot === 'weapon'
+}
+
 let equipSeq = 0
 export function rollEquip(slot: EquipSlot, quality: Rarity): EquipItem {
   const q = EQUIP_QUALITY[quality]
@@ -1199,7 +1389,7 @@ export function rollEquip(slot: EquipSlot, quality: Rarity): EquipItem {
   }
   const word = info.nameWords[Math.floor(Math.random() * info.nameWords.length)]
   equipSeq += 1
-  return { id: `eq${Date.now()}_${equipSeq}`, slot, quality, name: `${RARITY_INFO[quality].label}·${word}`, innate, extra }
+  return { id: `eq${Date.now()}_${equipSeq}`, slot, quality, name: `${RARITY_INFO[quality].label}·${word}`, innate, extra, lv: 0 }
 }
 
 /** 按权重抽一个品阶（用于常规掉落） */
@@ -1215,14 +1405,21 @@ export function rollEquipQuality(): Rarity {
 
 /**
  * 汇总一件装备全部词条到某个类型的加成总和（百分比数值，未除以 100）。
- * 对畸形装备要能兜住：旧版本存档 / 手工改坏的存档可能缺 innate 或 extra，
- * 而 charStats 是渲染路径上的函数，抛一次就是白屏；返回 0 顶多让这件装备暂时没加成。
+ *
+ * **含强化倍率**（v1.38）：这是"这件装备实际给了多少"的唯一出口，engine 的 charStatsRaw
+ * 五个词条全走这里，所以强化一旦挂上就自动进了属性、战力、一键穿戴、分解判定的每一处，
+ * 不存在"某处忘了乘"的分叉。要拿**白板数值**（界面逐条显示词条）请直接读 item.innate/extra，
+ * 别从这里反推。
+ *
+ * 对畸形装备要能兜住：旧版本存档 / 手工改坏的存档可能缺 innate 或 extra、
+ * v1.38 之前的每一件都缺 lv，而 charStats 是渲染路径上的函数，抛一次就是白屏；
+ * 返回 0（或 1 倍）顶多让这件装备暂时没加成。
  */
 export function equipAffixSum(item: EquipItem, type: AffixType): number {
   if (!item || !item.innate) return 0
   let sum = item.innate.type === type ? item.innate.value : 0
   for (const a of item.extra ?? []) if (a && a.type === type) sum += a.value
-  return sum
+  return sum * equipEnhMult(item.lv)
 }
 
 /**
@@ -1240,6 +1437,106 @@ export const EQUIP_BREAKDOWN: Record<Rarity, { essence: number; xuanjing: number
   tian: { essence: 16, xuanjing: 1 },
   quasi: { essence: 28, xuanjing: 2 },
   sheng: { essence: 45, xuanjing: 3 },
+}
+
+// ── 装备强化（v1.38，用户："装备新增装备升级功能…强化消耗斗气结晶和武魂精血，按照品质消耗"）──
+/**
+ * 强化三件事：**每级给这件装备的词条乘 1 + 5%**、**上限按品阶**、**价目按品阶**。
+ *
+ * 1) 为什么是乘词条、而不是加一条新属性：
+ *    装备词条全是百分比（见文件顶部的取舍），乘上去天然跟着品阶与洗练走——
+ *    洗得好的胚子强化收益也高，两套系统是叠乘关系而不是各说各话。
+ *    倍率**线性不叠乘**（`1 + 0.05 × lv`，不是 `1.05^lv`）：满级必须是玩家能心算的数，
+ *    "圣装 +24 = 词条 ×2.2"一句话说得清；改成复利就变成 ×3.2，界面上也没法向玩家解释。
+ *
+ * 2) 上限按品阶 = 4 × 阶序（黄4 / 玄8 / 地12 / 天16 / 准圣20 / 圣24）。
+ *    于是满级倍率恰好是 1.2 / 1.4 / 1.6 / 1.8 / 2.0 / 2.2 —— 与六档品阶同构，落差可控。
+ *    低阶装备不是"不能强化"，而是**强到底也比不过一件白板高阶**（黄满 ×1.2 的 statMult 仍是 0.96，
+ *    玄白板就是 1.0），这样"低级装备该分解"的判断不会被强化搅乱。
+ *
+ * 3) 价目按品阶分档、**每级单价随等级线性上涨**（第 n 级 = 基价 × n，n 从 1 起）。
+ *    为什么强化敢涨价、而洗练必须固定价：洗练是**无限次**的重复动作，价格会涨的话
+ *    "再洗几次"就永远算不出预算（见 EQUIP_REFORGE 的注释）；强化是**有上限**的有限进度，
+ *    UI 直接把"下一级要多少"摆在按钮旁，涨价反而是"越到后面越贵"的自然表达。
+ *
+ * 4) 数值定标：只用**已实测的线上存档存量**反推，不拍脑袋（见 design/数值设计.md §21）。
+ *    顶层玩家（125 关）结晶持有 1500 万~6500 万、武魂精血持有 4500~12000，
+ *    而精血终身只被升星吃掉 1350~2700 —— 这两样正是**大量闲置、几乎没出口**的资源，
+ *    拿它们当强化货币等于给挂机收益开了个新出口，而不去抢升星要的玄晶。
+ *    满强化总价（Σ 基价×n = 基价 × cap(cap+1)/2）：
+ *      黄 8,000 结晶 / 20 精血       玄 9.0 万 / 108       地 46.8 万 / 390
+ *      天 204 万 / 1088              准圣 735 万 / 2730     圣 2400 万 / 6000
+ *    **精血价上线当天由用户上调过一档**（用户："精血消耗再稍微加高一点点"）：基价由 1/2/3/6/10/16
+ *    提到 2/3/5/8/13/20，结晶价不动。精血虽是闲置资源，但它也是升星的燃料，
+ *    强化若吃得太少就等于"白送"，调高后顶层强满一件圣装要 6000 精血（约其手上的一半存量）。
+ *    校准点：顶层玩家手上那 1500 万结晶够把**两件圣装**强满，或把一套天阶四件强满还剩一半；
+ *    中低层（55 关，持有 3 万结晶）刚好够一件地阶强满 —— 每一档都够得着，但都要攒。
+ */
+export interface EquipEnhanceDef {
+  /** 强化等级上限（0 ~ cap） */
+  cap: number
+  /** 第 1 级的斗气结晶价；第 n 级 = 此值 × n */
+  crystal: number
+  /** 第 1 级的武魂精血价；第 n 级 = 此值 × n */
+  essence: number
+}
+export const EQUIP_ENHANCE: Record<Rarity, EquipEnhanceDef> = {
+  yellow: { cap: 4, crystal: 800, essence: 2 },
+  xuan: { cap: 8, crystal: 2_500, essence: 3 },
+  di: { cap: 12, crystal: 6_000, essence: 5 },
+  tian: { cap: 16, crystal: 15_000, essence: 8 },
+  quasi: { cap: 20, crystal: 35_000, essence: 13 },
+  sheng: { cap: 24, crystal: 80_000, essence: 20 },
+}
+
+/** 每级给词条加的倍率（线性：满级倍率 = 1 + 0.05 × cap） */
+export const EQUIP_ENH_PER_LV = 0.05
+
+/** 分解强化过的装备时退还的**已投入材料**比例（与放生返还同一个数，语义也同一个：留 30% 当换装成本） */
+export const EQUIP_ENH_REFUND = 0.7
+
+/** 该品阶的强化上限 */
+export function equipEnhCap(quality: Rarity): number {
+  return EQUIP_ENHANCE[quality]?.cap ?? 0
+}
+
+/**
+ * 强化倍率。**对缺失/畸形字段返回 1**：v1.38 之前掉落的装备一条 `lv` 都没有，
+ * 而本函数在 charStats 的渲染路径上，返回 1 顶多是"这件暂时没强化加成"，抛错就是整页白屏。
+ */
+export function equipEnhMult(lv: number | undefined): number {
+  const n = Number.isFinite(lv) ? Math.max(0, Math.floor(lv as number)) : 0
+  return 1 + EQUIP_ENH_PER_LV * n
+}
+
+/** 从 lv 强化到 lv+1 要花多少（已满级返回 0，调用方无需自己判断上限） */
+export function equipEnhCost(quality: Rarity, lv: number): { crystal: number; essence: number } {
+  const def = EQUIP_ENHANCE[quality]
+  const n = Number.isFinite(lv) ? Math.max(0, Math.floor(lv)) : 0
+  if (!def || n >= def.cap) return { crystal: 0, essence: 0 }
+  return { crystal: def.crystal * (n + 1), essence: def.essence * (n + 1) }
+}
+
+/** 强化到 lv 级**累计**投入了多少（Σ 基价×i，i = 1..lv）—— 分解退还的依据 */
+export function equipEnhSpent(quality: Rarity, lv: number): { crystal: number; essence: number } {
+  const def = EQUIP_ENHANCE[quality]
+  const n = Number.isFinite(lv) ? Math.max(0, Math.min(Math.floor(lv), equipEnhCap(quality))) : 0
+  if (!def || n <= 0) return { crystal: 0, essence: 0 }
+  const k = (n * (n + 1)) / 2
+  return { crystal: def.crystal * k, essence: def.essence * k }
+}
+
+/**
+ * 分解时退还的强化材料（投入的 70%，向下取整）。
+ *
+ * 为什么必须退：满强化的圣装投入 2400 万结晶 + 4800 精血，一次误点"分解"就全没了——
+ * 那是玩家挂机几十小时的产出，界面上的二次确认挡不住"我以为这是件垃圾"。
+ * 为什么只退 70%：全额退等于强化材料可以随身携带，"强化一件便宜的、分解、再强化贵的"
+ * 就成了零成本搬运，强化也就不再是**这件装备**的投入了。留 30% 当换装成本，与放生返还同一个口径。
+ */
+export function equipEnhRefund(quality: Rarity, lv: number): { crystal: number; essence: number } {
+  const s = equipEnhSpent(quality, lv)
+  return { crystal: refundOf(s.crystal), essence: refundOf(s.essence) }
 }
 
 // ── 商城：限时增益（花灵金买临时 buff，到期消失，不增加任何存量资源）──────────────

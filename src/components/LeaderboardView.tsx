@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useGame, combatPower, fmtNum } from '../game/engine'
 import { submitScore, fetchLeaderboard, fetchMe, agoText, type LbRow } from '../game/leaderboardApi'
+import RankBadge from './RankBadge'
 
 const NAME_KEY = 'doupo-idle-nickname'
 
@@ -102,8 +103,8 @@ export default function LeaderboardView() {
               return (
                 <div key={r.rank}
                   className={`flex items-center gap-3 rounded px-2 py-1.5 text-sm ${me ? 'border border-dq-gold bg-dq-gold/10' : ''}`}>
-                  <div className={`w-8 shrink-0 text-center ${r.rank <= 3 ? 'text-dq-fire' : 'text-[#a89478]'}`}>
-                    {r.rank <= 3 ? ['🥇', '🥈', '🥉'][r.rank - 1] : r.rank}
+                  <div className={`flex w-8 shrink-0 justify-center ${r.rank <= 3 ? 'text-dq-fire' : 'text-[#a89478]'}`}>
+                    <RankBadge rank={r.rank} />
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className={`truncate ${me ? 'text-dq-gold' : 'text-[#e8dcc8]'}`}>{r.name}{me && '（我）'}</div>

@@ -1,12 +1,15 @@
 import { useState, useMemo } from 'react'
+import { Swords, Sparkles } from 'lucide-react'
 import { useGame, game, charLabel, charStats, rarityInfo, itemLabel, LAB_OFFER_TIMEOUT, type GameState } from '../game/engine'
 import { portraitFor } from '../game/portraits'
 import { monsterSpriteFor } from '../game/monsters'
 import { sceneFor } from '../game/scenes'
 import { blessingIconFor } from '../game/blessings'
+import { itemSprite } from '../game/icons'
+import Ico from './Ico'
 import { impactFxForMonster, healFx } from '../game/fx'
 import { useCombatSound } from '../game/sound'
-import { LAB_BLESSINGS, isLabBoss, towerMonsterName, towerMonsterSpriteId, DUTY_OF_ROLE, enemyUnitsForFloor, type BlessingCategory } from '../game/data'
+import { LAB_BLESSINGS, isLabBoss, towerMonsterName, towerMonsterSpriteId, DUTY_OF_ROLE, enemyUnitsForFloor, PILLS, labPillCost, LAB_ESSENCE_COST, LAB_ESSENCE_AMOUNT, LAB_HERB_COST, LAB_HERB_AMOUNT, type BlessingCategory } from '../game/data'
 import { EnemySquad, EnemyTotalBar } from './EnemySquad'
 import { active, atImpact, DASH_MS, HIT_MS, IMPACT_MS, KILL_MS, DebuffBadge, FloatingNumbers, ImpactFx } from './combatFx'
 
@@ -139,7 +142,7 @@ export default function LabView() {
 
         {lab.offer && (
           <div className="mb-4 rounded-md border border-dq-fire bg-black/60 p-3">
-            <div className="mb-2 text-center text-sm text-dq-fire">✨ 三选一祝福 ✨
+            <div className="mb-2 flex items-center justify-center gap-2 text-center text-sm text-dq-fire"><Sparkles size={14} /><span>三选一祝福</span><Sparkles size={14} />
               {lab.offerAt > 0 && (
                 <span className="ml-2 text-xs text-[#a89478]">
                   {Math.max(0, Math.ceil((LAB_OFFER_TIMEOUT - (now - lab.offerAt)) / 1000))}s 后自动选择
@@ -159,7 +162,7 @@ export default function LabView() {
                     {icon ? (
                       <img src={icon} alt={b.name} className="mx-auto h-8 w-8 rounded object-cover sm:h-10 sm:w-10" />
                     ) : (
-                      <div className="text-xl">✨</div>
+                      <Sparkles size={20} className="mx-auto" />
                     )}
                     <div className="mt-1" style={{ color }}>{b.name}</div>
                     <div className="mt-1 text-[#a89478]">{b.desc}</div>
@@ -186,7 +189,7 @@ export default function LabView() {
             </div>
           </div>
 
-          <div className="shrink-0 px-1 text-lg text-dq-fire sm:px-2 sm:text-2xl">⚔</div>
+          <div className="shrink-0 px-1 text-dq-fire sm:px-2"><Swords size={22} className="sm:hidden" /><Swords size={30} className="hidden sm:block" /></div>
 
           <div className="flex shrink-0 flex-col items-center gap-2">
             <EnemySquad enemies={enemies} now={now} events={labEvents} sprite={monsterSprite} small />
@@ -202,7 +205,7 @@ export default function LabView() {
               {e.type === 'monsterDmg' && `${enemyName(e.from)} 对 ${charLabel(e.who!)?.name ?? ''} 造成 ${e.value} 伤害`}
               {e.type === 'down' && `${charLabel(e.who!)?.name ?? ''} 倒下了`}
               {e.type === 'kill' && `突破 ${e.who}！`}
-              {e.type === 'drop' && `首通奖励 ${itemLabel(e.item!).icon}${itemLabel(e.item!).name} ×${e.value}`}
+              {e.type === 'drop' && `首通奖励 ${itemLabel(e.item!).name} ×${e.value}`}
             </div>
           ))}
         </div>
@@ -216,19 +219,52 @@ function LabShop() {
   const daoling = state.inventory.daoling ?? 0
   return (
     <div className="dq-panel rounded-md p-3">
-      <div className="mb-2 text-sm text-dq-gold">论道令商店（{daoling}）</div>
+      <div className="mb-1 text-sm text-dq-gold">论道令商店（{daoling}）</div>
+      {/* 说清这个资源为什么稀缺：论道令只在天梯塔首通新层时发放，刷不到 ——
+          不写这句，玩家会以为"多爬几天就能买光"，定价（8 品 1024 令）看着像乱标 */}
+      <div className="mb-2 text-[10px] text-[#a89478]">
+        论道令来自天梯塔首通奖励，重复通关不再产出。这里是拿它换丹药 / 养成材料的救急通道。
+      </div>
       <div className="space-y-1">
-        {[1, 3, 5].map(grade => (
-          <button key={grade} onClick={() => game.buyLabShop('pill', grade)}
-            className="flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs hover:border-dq-gold">
-            <span>💊 {grade} 品丹药 ×1</span>
-            <span className="text-dq-gold">{grade * 15} 论道令</span>
-          </button>
-        ))}
+        {/* 遍历 PILLS 全 8 品（v1.35 前只挂 1/3/5 品，卡在 6/7/8 品突破点的人买不到东西）。
+            价格一律读 labPillCost —— 界面上显示的和引擎扣的是同一个数，不可能漂。 */}
+        {PILLS.map(pill => {
+          const cost = labPillCost(pill.grade)
+          const owned = state.inventory[pill.id] ?? 0
+          const afford = daoling >= cost
+          return (
+            <button key={pill.id} onClick={() => game.buyLabShop('pill', pill.grade)}
+              data-shop-item={`pill-${pill.grade}`}
+              className={`flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${afford ? 'hover:border-dq-gold' : 'opacity-50'}`}>
+              <span className="flex items-center gap-1.5">
+                <Ico name={itemSprite(pill.id)} emoji={pill.icon} className="h-5 w-5" />
+                <span>{pill.name} ×1</span>
+                {owned > 0 && <span className="ml-1 text-[10px] text-[#a89478]">持有 {owned}</span>}
+              </span>
+              <span className="text-dq-gold">{cost} 论道令</span>
+            </button>
+          )
+        })}
         <button onClick={() => game.buyLabShop('essence')}
-          className="flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs hover:border-dq-gold">
-          <span>🩸 武魂精血 ×20</span>
-          <span className="text-dq-gold">10 论道令</span>
+          data-shop-item="essence"
+          className={`flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${daoling >= LAB_ESSENCE_COST ? 'hover:border-dq-gold' : 'opacity-50'}`}>
+          <span className="flex items-center gap-1.5">
+            <Ico name={itemSprite('essence')} className="h-5 w-5" />
+            <span>武魂精血 ×{LAB_ESSENCE_AMOUNT}</span>
+          </span>
+          <span className="text-dq-gold">{LAB_ESSENCE_COST} 论道令</span>
+        </button>
+        {/* 灵药（2026-09-17 用户定「论道商店允许购买灵药」）。价格读 LAB_HERB_COST ——
+            **不能再便宜**：1 令换超过 ≈7.5 灵药，「买灵药→炼丹」就会比直接买丹药划算，
+            丹药那 8 档就没人点了。推导写在 data.ts 的 LAB_HERB_COST 上。 */}
+        <button onClick={() => game.buyLabShop('herb')}
+          data-shop-item="herb"
+          className={`flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${daoling >= LAB_HERB_COST ? 'hover:border-dq-gold' : 'opacity-50'}`}>
+          <span className="flex items-center gap-1.5">
+            <Ico name={itemSprite('herb')} className="h-5 w-5" />
+            <span>灵药 ×{LAB_HERB_AMOUNT}</span>
+          </span>
+          <span className="text-dq-gold">{LAB_HERB_COST} 论道令</span>
         </button>
       </div>
     </div>

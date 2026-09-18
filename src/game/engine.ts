@@ -5,22 +5,43 @@ import {
   xpToNext, needsPillFor, pillGradeFor, realmLabel, realmMult,
   stageStats, isBossStage, zoneForStage, monsterForStage, stageCoinReward,
   labStats, isLabBoss, labDaolingReward,
+  labPillCost, LAB_ESSENCE_COST, LAB_ESSENCE_AMOUNT, LAB_HERB_COST, LAB_HERB_AMOUNT,
   enemyUnitsForStage, enemyUnitsForFloor, DUTY_OF_ROLE, bondBonusesFor,
-  MAX_STARS, starUpCost, starMultOf, starTierIndex, starTierOf, DUPE_SHARD, SHARD_COST,
+  MAX_STARS, starUpCost, starMultOf, starTierIndex, starTierOf, DUPE_SHARD,
+  shardCostOf, recruitPoolOf, linkActive, isLinkChar, linkClosedText,
   refundOf, refundPillsOf, charInvestment,
   PITY_TIAN, PITY_QUASI, PITY_SHENG, PITY_TIAN_UPGRADE,
-  rollEquip, rollEquipQuality, equipAffixSum, EQUIP_BREAKDOWN, EQUIP_REFORGE, rollReforgedAffix,
+  rollEquip, rollEquipQuality, equipAffixSum, EQUIP_BREAKDOWN, EQUIP_REFORGE, rollReforgedAffix, canUndoReforge,
+  equipEnhCap, equipEnhCost, equipEnhSpent, equipEnhRefund,
   SHOP_BUFFS, SHOP_GOODS,
   type CharacterDef, type Rarity, type EquipSlot, type EquipItem, type EquipAffix, type BuffKind,
   type EnemyUnit, type Role, type AtkStyle, type BondBonuses, type ControlDebuff,
 } from './data'
 import { playSound } from './sound'
 import { fetchRemoteRewards, type RemoteReward } from './rewards'
+import {
+  ACTIVITY_METRICS, activeActivities, activityStatus, fetchActivities, todayKey,
+  type ActivityDef,
+} from './activities'
+import { mailGiftKey, type Mail } from './mail'
+import { SAVE_KEY } from './storageKeys'
 
 export interface RosterEntry { level: number; xp: number; stars: number; equip: Partial<Record<EquipSlot, EquipItem>> }
 
 /** 洗练结果。失败一律带 why 给玩家看 —— 洗练是玩家要反复点的按钮，"点了没反应"最难排查 */
 export interface ReforgeResult { ok: boolean; why?: string; affix?: EquipAffix }
+
+/**
+ * 一次「可换回」的洗练：记住**洗之前那条词条**，玩家可以在它被下一次洗练覆盖前换回去。
+ *
+ * 只对最高阶武器记账（见 data.ts 的 canUndoReforge）。**它随存档走**（`state.reforgeUndo`）：
+ * 这个机制的全部价值就是"别让一次手滑变成永久损失"，只放内存里等于一半时候没有
+ * （切后台被系统杀、手抖刷新都会吞掉它）。存档里的老值一律是 null，形状不对也当没有。
+ */
+export interface ReforgeUndo { itemId: string; idx: number; from: EquipAffix }
+
+/** 强化结果。`levels` 是**实际强化成了几级**：要求 5 级但精血只够 2 级时返回 2，不是 0 */
+export interface EnhanceResult { ok: boolean; levels: number; why?: string }
 
 const EQUIP_SLOTS: EquipSlot[] = ['weapon', 'armor', 'accessory', 'ring']
 /** 暴击伤害基础倍率：没有戒指/词条时暴击率为 0，此值不生效；有暴击后按此为基准叠加装备的暴击伤害词条。
@@ -208,15 +229,76 @@ export interface GameState {
   lastTick: number
   combatEvents: CombatEvent[]
   equipBag: EquipItem[]
+  /** 最高阶武器最近一次洗练的可换回快照（v1.38.2）。老存档没有这个字段 ⇒ null */
+  reforgeUndo: ReforgeUndo | null
   buffs: ActiveBuff[] // 商城限时增益（到期自动失效）
   shop: { date: string; counts: Record<string, number> } // 当日各商品已购次数，驱动价格递增、跨天回落
   gifts: Record<string, number> // 一次性发放的领取标记：发放 id → 领取时间戳（防重复发，见 GIFTS）
+  /** 活动中心进度（v1.42）。老存档没有这个字段 ⇒ sanitizeActivityState 补一份空的 */
+  activities: ActivityState
+}
+
+/**
+ * 活动中心的进度（v1.42，见 game/activities.ts）。
+ *
+ * 这里**没有一张"领取记录表"**：领取状态直接在 claimed 里按活动 id 记时间戳 ——
+ * once 型看"有没有"，daily 型看"是不是今天的"。于是这张表**不会随天数增长**
+ * （每个 daily 活动每天只是覆盖同一个键），也不需要任何清理逻辑。
+ */
+export interface ActivityState {
+  /** 活动 id → 领取时间戳 */
+  claimed: Record<string, number>
+  /** 累计计数（cycle=once 的任务用）：metric → 值 */
+  total: Record<string, number>
+  /** 当日计数（cycle=daily 的任务用）；date 一跨天，day 与 dayOnlineMin 一起清零 */
+  date: string
+  day: Record<string, number>
+  /** 上次签到日期（todayKey）与连续签到天数 */
+  lastCheckin: string
+  streak: number
+  /** 在线时长：累计分钟 / 当日分钟 */
+  onlineMin: number
+  dayOnlineMin: number
+}
+
+function freshActivityState(): ActivityState {
+  return {
+    claimed: {}, total: {}, date: todayKey(), day: {},
+    lastCheckin: '', streak: 0, onlineMin: 0, dayOnlineMin: 0,
+  }
+}
+
+/** 只认形状对的那部分，坏值一律回落到默认 —— **绝不因为多一个字段把整份存档判死** */
+function sanitizeActivityState(raw: unknown): ActivityState {
+  const base = freshActivityState()
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return base
+  const o = raw as Record<string, unknown>
+  const numMap = (v: unknown): Record<string, number> => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {}
+    const out: Record<string, number> = {}
+    for (const k of Object.keys(v as Record<string, unknown>)) {
+      const n = Number((v as Record<string, unknown>)[k])
+      if (Number.isFinite(n) && n > 0) out[k] = n
+    }
+    return out
+  }
+  const nonNeg = (v: unknown) => (Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : 0)
+  return {
+    claimed: numMap(o.claimed),
+    total: numMap(o.total),
+    // 日期串不认识就当"今天"：真跨天了也只是少清一次当日计数，比把老档判死强
+    date: typeof o.date === 'string' && o.date ? o.date : base.date,
+    day: numMap(o.day),
+    lastCheckin: typeof o.lastCheckin === 'string' ? o.lastCheckin : '',
+    streak: nonNeg(o.streak),
+    onlineMin: nonNeg(o.onlineMin),
+    dayOnlineMin: nonNeg(o.dayOnlineMin),
+  }
 }
 
 /** 商城限时增益：id 对应 SHOP_BUFFS，expireAt 为失效时间戳 */
 export interface ActiveBuff { id: string; expireAt: number }
 
-const SAVE_KEY = 'doupo-idle-save-v1'
 const ROUND_SEC = 2
 /** 天梯塔三选一祝福自动选择倒计时(ms)：超时未选则随机自动选一个，不卡住玩家 */
 export const LAB_OFFER_TIMEOUT = 20000
@@ -249,8 +331,11 @@ const GIFTS: { id: string; label: string; grant: (inv: Record<string, number>) =
   },
 ]
 
-/** 服务端奖励清单的复查间隔（见 syncRemoteRewards）。跟云备份的 3 分钟对齐，别给服务器添没必要的心跳 */
-const REMOTE_REWARD_POLL_MS = 3 * 60 * 1000
+/**
+ * 服务端配置（奖励清单 + 活动配置）的复查间隔，跟云备份的 3 分钟对齐，别给服务器添没必要的心跳。
+ * 两者共用一个心跳：它们都是"运营改文件、在线的人等着生效"的同一类东西。
+ */
+const REMOTE_POLL_MS = 3 * 60 * 1000
 
 /** 数值兜底：缺失/非数字（存档被改坏）一律当 0，避免 NaN 顺着存档扩散 */
 function num(v: unknown): number {
@@ -283,11 +368,13 @@ function freshState(): GameState {
     lastTick: Date.now(),
     combatEvents: [],
     equipBag: [],
+    reforgeUndo: null,
     buffs: [],
-    shop: { date: new Date().toDateString(), counts: {} },
+    shop: { date: todayKey(), counts: {} },
     // 全新账号直接视为「已领过」本批发放：这批补的是更新前就存在的老玩家，刚开的新号不该白拿一份
     // （新号想要的话就是改成 {}）。⚠️ migrate 里会显式覆盖 gifts，别删那一行。
     gifts: Object.fromEntries(GIFTS.map(g => [g.id, 0])),
+    activities: freshActivityState(),
   }
 }
 
@@ -385,6 +472,9 @@ export function charPower(entry: RosterEntry, cdef: CharacterDef, fireId: string
  * 单件装备的校验/修复：旧版本存档、被手工改坏的存档里可能出现缺 innate / extra 为 null /
  * 槽位或品阶非法的条目。这类条目一旦进内存，就会在 charStats（渲染路径）里抛错导致白屏，
  * 或者让「一键最优穿戴」把装备塞进不存在的槽位（装备凭空消失）。修不了就丢弃该件。
+ *
+ * v1.38 的强化等级 `lv` 也在这里兜底：**它是"可以缺"的字段**（v1.38 之前掉的每件装备都没有），
+ * 缺了补 0、越界夹回区间，但它**不是**丢弃一件装备的理由 —— 修不回来的只有上面那几类结构损伤。
  */
 function sanitizeEquipItem(raw: unknown): EquipItem | null {
   if (!raw || typeof raw !== 'object') return null
@@ -401,6 +491,13 @@ function sanitizeEquipItem(raw: unknown): EquipItem | null {
     id: it.id, slot: it.slot as EquipSlot, quality: it.quality as Rarity,
     name: typeof it.name === 'string' ? it.name : '装备',
     innate: innate as EquipAffix, extra: extra as EquipAffix[],
+    // v1.38 强化等级。**v1.38 之前的每一件装备都没有这个字段**，所以"缺字段"是常态而不是异常：
+    // 缺失 → 0 级（白板），超出上限或非有限值一律夹回合法区间。绝不因为它把装备丢掉——
+    // 丢弃一件玩家穿着的装备，比让它少几级强化的破坏性大得多。
+    lv: Math.max(0, Math.min(
+      Number.isFinite(it.lv) ? Math.floor(it.lv as number) : 0,
+      equipEnhCap(it.quality as Rarity),
+    )),
   }
 }
 
@@ -414,9 +511,33 @@ function sanitizeEquipMap(raw: unknown): Partial<Record<EquipSlot, EquipItem>> {
   return out
 }
 
+/**
+ * 「可换回」快照的校验/修复。**形状不对就当没有**（返回 null），绝不因此把整份存档判死：
+ * 它是一份可有可无的后悔药，坏掉的代价应该是"少了这次换回机会"，不是"打不开游戏"。
+ * 装备本身还在不在不在这里查（那要等 equipBag 解析完），交给 reforgeUndoOf。
+ */
+function sanitizeReforgeUndo(raw: unknown): ReforgeUndo | null {
+  if (!raw || typeof raw !== 'object') return null
+  const s = raw as Partial<ReforgeUndo>
+  if (typeof s.itemId !== 'string' || !s.itemId) return null
+  if (!Number.isFinite(s.idx)) return null
+  const from = s.from
+  if (!from || typeof from !== 'object' || typeof from.type !== 'string' || !Number.isFinite(from.value)) return null
+  return {
+    itemId: s.itemId, idx: Math.max(0, Math.floor(s.idx as number)),
+    from: { type: from.type, value: from.value } as EquipAffix,
+  }
+}
+
 class GameStore {
   state: GameState
   private listeners = new Set<() => void>()
+  /**
+   * 服务端下发的活动配置（v1.42）。**不存档**：它是运营侧的数据、随拉随用，
+   * 存档里只留玩家自己的进度（state.activities）。放进 state 的后果是每次 save 都把
+   * 整份活动清单写进 localStorage、再随云备份传一遍 —— 而它跟玩家进度没有半点关系。
+   */
+  private remoteActivities: ActivityDef[] = []
   private saveSuspended = false // 恢复云存档时挂起本地保存，避免 reload 的 beforeunload/定时 save 覆盖刚写入的存档
   private justGranted: string[] = [] // 本次加载刚发放的一次性物品（只用于启动提示，不写进存档）
   /**
@@ -434,9 +555,11 @@ class GameStore {
     setInterval(() => this.tick(), 100)
     setInterval(() => this.save(), 2000)
     window.addEventListener('beforeunload', () => this.save())
-    // 服务端奖励：启动拉一次，之后定期再拉——运营改完文件，在线玩的人不用刷新也能等到
+    // 服务端配置：启动拉一次，之后定期再拉——运营改完文件，在线玩的人不用刷新也能等到
     this.syncRemoteRewards()
-    setInterval(() => this.syncRemoteRewards(), REMOTE_REWARD_POLL_MS)
+    this.syncActivities()
+    setInterval(() => this.syncRemoteRewards(), REMOTE_POLL_MS)
+    setInterval(() => this.syncActivities(), REMOTE_POLL_MS)
   }
 
   private load(): GameState {
@@ -554,13 +677,17 @@ class GameStore {
       lab: { ...base.lab, ...(parsed.lab ?? {}), battle: null },
       combatEvents: [],
       equipBag: Array.isArray(parsed.equipBag) ? parsed.equipBag.map(sanitizeEquipItem).filter((x): x is EquipItem => !!x) : [],
+      // v1.38.2 老存档一律没有这个字段 ⇒ sanitizeReforgeUndo(undefined) = null，键存在但不影响任何老行为
+      reforgeUndo: sanitizeReforgeUndo(parsed.reforgeUndo),
       buffs: Array.isArray(parsed.buffs) ? parsed.buffs.filter(b => b && typeof b.expireAt === 'number' && b.expireAt > Date.now()) : [],
       pityTian,
       pityQuasi,
       pitySheng,
       shop: (parsed.shop && typeof parsed.shop.counts === 'object' && parsed.shop.counts)
         ? { date: parsed.shop.date, counts: parsed.shop.counts }
-        : { date: new Date().toDateString(), counts: {} },
+        : { date: todayKey(), counts: {} },
+      // v1.42 活动中心。老存档一律没有这个字段 ⇒ 补一份空的（进度从零开始，**绝不因此判死档**）
+      activities: sanitizeActivityState(parsed.activities),
     }
     // 上面 `...parsed` 会把老字段一起带进来，留着只会在存档里堆垃圾（新代码不再读它们）
     delete (out as { pityCommon?: unknown }).pityCommon
@@ -609,6 +736,171 @@ class GameStore {
     this.save() // 立刻落盘：到账要尽快随云备份上传，别等 2 秒定时器（关页面就走不到那一步）
     this.emit()
     if (labels.length) this.setNotice(`礼包到账：${labels.join('、')}`)
+  }
+
+  /**
+   * 这封邮件领过没有。领取标记与奖励**共用 state.gifts**（键加 `mail:` 前缀隔开，见 mail.ts），
+   * 所以整个邮箱功能**一个存档字段都没加** —— 老档不用迁移，也不存在"迁移漏了哪个分支"的风险。
+   */
+  mailClaimed(id: string): boolean {
+    return (this.state.gifts ?? {})[mailGiftKey(id)] !== undefined
+  }
+
+  /**
+   * 领取一封邮件的附件（纯公告邮件没有附件，点的就是「知道了」——同样记在这里）。
+   *
+   * 重复点、多标签页同时点、领完刷新再点，都只会到账一次：幂等键就是 gifts 里那个键。
+   * 附件数值已由 mail.ts 的白名单校验过（非法的那封根本不会进到列表里）。
+   */
+  claimMail(mail: Mail): boolean {
+    const key = mailGiftKey(mail.id)
+    if ((this.state.gifts ?? {})[key] !== undefined) return false
+    const gifts = { ...(this.state.gifts ?? {}) }
+    const inventory = { ...this.state.inventory }
+    const keys = Object.keys(mail.items ?? {})
+    for (const k of keys) inventory[k] = num(inventory[k]) + mail.items[k]
+    gifts[key] = Date.now()
+    this.state.gifts = gifts
+    this.state.inventory = inventory
+    // 立刻落盘：到账要尽快随云备份上传，别等 2 秒定时器（关页面就走不到那一步）
+    this.save()
+    this.emit()
+    if (keys.length) this.setNotice(`邮件附件已领取：${mail.title}`)
+    return true
+  }
+
+  // ── 活动中心（v1.42，配置见 game/activities.ts）──────────────────────────────
+  //
+  // 三条不变量，改这块之前先看这三条：
+  //  ① 活动**不是**发奖清单。rewards.json 是"拉到就自动到账"，活动是"玩家自己来点领取"——
+  //     所以活动配置只存在内存里（this.remoteActivities），存档里**只留进度**。
+  //  ② 领取状态不另立字段，就写在 state.activities.claimed 里（once 看有没有、daily 看是不是今天的），
+  //     这张表因此**不随天数增长**，也没有任何清理逻辑。
+  //  ③ 判定与发放在**同一处**（claimActivity）：界面上的按钮藏不藏是第二道闸，
+  //     v1.41 已经吃过一次"界面藏了、引擎没拒"的教训。
+
+  /** 当日计数与当日在线时长跟着日期走；跨天清零。**全站日期口径只有 activities.todayKey 一处** */
+  private ensureActivityDay() {
+    const a = this.state.activities
+    const today = todayKey()
+    if (a.date !== today) {
+      a.date = today
+      a.day = {}
+      a.dayOnlineMin = 0
+    }
+  }
+
+  /**
+   * 在线时长累加（tick 里调，单位分钟）。
+   * **离线时间不算在线**：引擎不跑就不会累加，而加载时的 applyOfflineProgress 只补资源、不碰这里。
+   */
+  private accrueOnline(minutes: number) {
+    if (!(minutes > 0)) return
+    this.ensureActivityDay()
+    const a = this.state.activities
+    a.onlineMin = num(a.onlineMin) + minutes
+    a.dayOnlineMin = num(a.dayOnlineMin) + minutes
+  }
+
+  /**
+   * 记一次计数指标（活动中心「任务类」的进度）。**挂点唯一**：每个指标只在一个动作处调一次。
+   *
+   * 白名单外的指标名直接忽略 —— 这不是给配置容错（配置那边的校验更早），是给**调用方**兜底：
+   * 挂点上敲错一个字母，不该往存档里堆一个永远没人读、还会随云备份传下去的垃圾键。
+   */
+  bumpMetric(metric: string, n = 1) {
+    if (!(metric in ACTIVITY_METRICS) || !(n > 0)) return
+    this.ensureActivityDay()
+    const a = this.state.activities
+    a.total[metric] = num(a.total[metric]) + n
+    a.day[metric] = num(a.day[metric]) + n
+    // 不在这里 save()/emit()：调它的那些动作各自都会落盘并重渲，再补一次纯属多余
+  }
+
+  /** 服务端活动配置（内存态，不存档）。**只保留进行中且启用中的**，界面拿到的就是能玩的那些 */
+  activityList(now: number = Date.now()): ActivityDef[] {
+    return activeActivities(this.remoteActivities, now)
+  }
+
+  /** 拉活动配置。拉不到就**沿用上一次的清单**（有旧配置总比活动中心突然空掉强），绝不影响游戏本身 */
+  async syncActivities(): Promise<void> {
+    try {
+      const list = await fetchActivities()
+      if (JSON.stringify(list) !== JSON.stringify(this.remoteActivities)) {
+        this.remoteActivities = list
+        this.emit()
+      }
+    } catch { /* 拉不到就算了，等下一次轮询 */ }
+  }
+
+  /** 活动当前的进度值。签到类**没有进度概念**（它的"完成"就是点那一下），走 activityReached */
+  activityProgress(a: ActivityDef): number {
+    this.ensureActivityDay()
+    const s = this.state.activities
+    if (a.kind === 'online') return num(a.cycle === 'daily' ? s.dayOnlineMin : s.onlineMin)
+    if (a.kind === 'task') return num(a.cycle === 'daily' ? s.day[a.metric] : s.total[a.metric])
+    return 0
+  }
+
+  /** 进度是否达标。**签到类恒为达标** —— 签到的前置条件就是"今天还没签"（由 claimed 判） */
+  activityReached(a: ActivityDef): boolean {
+    if (a.kind === 'checkin') return true
+    return this.activityProgress(a) >= a.target
+  }
+
+  /**
+   * 领过没有。once 型领过就永久算领过；daily 型只看**是不是今天领的** ——
+   * 于是 claimed 表不会随天数增长（每天只是覆盖同一个键），也不需要清理。
+   */
+  activityClaimed(a: ActivityDef, now: number = Date.now()): boolean {
+    const t = this.state.activities.claimed[a.id]
+    if (t === undefined) return false
+    return a.cycle === 'once' ? true : todayKey(t) === todayKey(now)
+  }
+
+  activityClaimable(a: ActivityDef, now: number = Date.now()): boolean {
+    return a.enabled && activityStatus(a, now) === 'active' && !this.activityClaimed(a, now) && this.activityReached(a)
+  }
+
+  /** 现在有几个能领的（tab 上的小红点）。配置还没拉回来时是 0 */
+  claimableCount(now: number = Date.now()): number {
+    return this.activityList(now).filter(a => this.activityClaimable(a, now)).length
+  }
+
+  /**
+   * 领取一份活动奖励。**判定与发放都在这里**，界面只管调它——
+   * 重复点、多标签页同时点、领完刷新再点，都只到账一次（幂等键就是 claimed 里的那个时间戳）。
+   */
+  claimActivity(id: string): { ok: boolean; why?: string } {
+    const now = Date.now()
+    const a = this.remoteActivities.find(x => x.id === id)
+    if (!a || !a.enabled) return { ok: false, why: '活动不存在或已下架' }
+    const st = activityStatus(a, now)
+    if (st === 'pending') return { ok: false, why: '活动尚未开启' }
+    if (st === 'ended') return { ok: false, why: '活动已结束' }
+    if (this.activityClaimed(a, now)) {
+      return { ok: false, why: a.cycle === 'daily' ? '今日已领取，明天再来' : '已领取' }
+    }
+    if (!this.activityReached(a)) return { ok: false, why: '条件尚未达成' }
+
+    const s = this.state.activities
+    const inventory = { ...this.state.inventory }
+    for (const k of Object.keys(a.items)) inventory[k] = num(inventory[k]) + a.items[k]
+    this.state.inventory = inventory
+    s.claimed = { ...s.claimed, [a.id]: now }
+
+    // 签到类：顺手记连续天数。昨天签过就 +1，否则重新从 1 起（跨天判定走同一个 todayKey）
+    if (a.kind === 'checkin') {
+      s.streak = s.lastCheckin === todayKey(now - 86400000) ? num(s.streak) + 1 : 1
+      s.lastCheckin = todayKey(now)
+      this.bumpMetric('checkin.days', 1)
+    }
+
+    // 立刻落盘：到账要尽快随云备份上传，别等 2 秒定时器（关页面就走不到那一步）
+    this.save()
+    this.emit()
+    this.setNotice(`活动奖励已领取：${a.title}`)
+    return { ok: true }
   }
 
   save() {
@@ -665,7 +957,14 @@ class GameStore {
   private tick() {
     const nowMs = Date.now()
     const dt = Math.min((nowMs - this.state.lastTick) / 1000, 5)
+    // 活动中心的「在线时长」用**另一个 dt**，别跟上面那个混：
+    // 上面那个上限 5 秒是给战斗/产出用的（防止关页面很久后一次补一大笔），
+    // 而浏览器会把后台标签页的定时器降频到分钟级 —— 用 5 秒的上限累加在线时长，
+    // "挂在后台"的时间几乎全丢，可那正是挂机游戏玩家的常态。
+    // 这里按 wall-clock 累加、单次最多算 5 分钟：兜住系统休眠/时钟跳变那种"其实不在线"的巨大间隔。
+    const onlineDt = Math.min(Math.max(0, nowMs - this.state.lastTick), 5 * 60 * 1000) / 60000
     this.state.lastTick = nowMs
+    this.accrueOnline(onlineDt)
 
     // 限时增益：先剔除已过期的，再按生效中的倍率加成挂机产出
     if (this.state.buffs.some(b => b.expireAt <= nowMs)) {
@@ -745,7 +1044,7 @@ class GameStore {
           break
         }
         this.state.inventory[pid] -= 1
-        this.setNotice(`⚡ ${CHAR_MAP[id]?.name} 服丹突破！${realmLabel(entry.level + 1)}`)
+        this.setNotice(`${CHAR_MAP[id]?.name} 服丹突破！${realmLabel(entry.level + 1)}`)
         playSound('breakthrough')
       }
       entry.xp -= need
@@ -1265,7 +1564,7 @@ class GameStore {
     const quality = rollEquipQuality()
     const item = rollEquip(slot, quality)
     this.state.equipBag.push(item)
-    this.setNotice(`🎁 获得装备：${item.name}`)
+    this.setNotice(`获得装备：${item.name}`)
   }
 
   private onKill() {
@@ -1298,15 +1597,17 @@ class GameStore {
       for (const f of FIRES) {
         if (f.stageReq === stage && !this.ownsFire(f.id)) {
           this.state.inventory[`fire_${f.id}`] = 1
-          this.setNotice(`🔥 首通第 ${stage} 关！获得异火「${f.name}」`)
+          this.setNotice(`首通第 ${stage} 关！获得异火「${f.name}」`)
         }
       }
     }
     if (boss && !isFirstClear) {
-      this.setNotice(`⚔ 击破第 ${stage} 关首领！`)
+      this.setNotice(`击破第 ${stage} 关首领！`)
     }
     this.state.stage += 1
     this.state.highestStage = Math.max(this.state.highestStage, this.state.stage)
+    // 活动中心：**推进的关卡数**（刷材料模式上面已经 return，反复刷同一关不会灌水）
+    this.bumpMetric('stage.win', 1)
     this.state.wipeStage = null
     this.state.wipeStreak = 0
     this.state.lastProgressAt = Date.now()
@@ -1415,6 +1716,9 @@ class GameStore {
 
   private labOnKill(b: LabBattleState, boss: boolean) {
     this.state.kills++
+    // 活动中心：**每一层都算**，不限首通 —— 天梯塔每轮都从第 1 层重来，
+    // 只在首通时计数的话，"今日通关 3 层"在推不动高层之后永远做不完（做成了死活动）。
+    this.bumpMetric('lab.win', 1)
     const bt = this.blessingTotals()
     this.state.inventory.crystal = (this.state.inventory.crystal ?? 0) + (labStats(b.floor).hp / 25) * (1 + bt.crystalPct / 100)
     this.state.inventory.coin = (this.state.inventory.coin ?? 0) + Math.floor(10 * (1 + bt.coinPct / 100))
@@ -1434,7 +1738,7 @@ class GameStore {
       for (const f of FIRES) {
         if (f.floorReq === b.floor && !this.ownsFire(f.id)) {
           this.state.inventory[`fire_${f.id}`] = 1
-          this.setNotice(`🔥 首通 ${b.floor} 层！获得异火「${f.name}」`)
+          this.setNotice(`首通 ${b.floor} 层！获得异火「${f.name}」`)
         }
       }
     }
@@ -1449,7 +1753,7 @@ class GameStore {
       if (offer.length > 0) {
         this.state.lab.offer = offer.slice(0, 3)
         this.state.lab.offerAt = Date.now()
-        this.setNotice(`✨ 第 ${b.floor} 层告破，三选一祝福降临！`)
+        this.setNotice(`第 ${b.floor} 层告破，三选一祝福降临！`)
       }
     }
   }
@@ -1474,19 +1778,37 @@ class GameStore {
     this.setNotice(`⏳ 祝福选择超时，自动选了「${def?.name ?? pick}」`)
   }
 
-  buyLabShop(item: 'pill' | 'essence', grade?: number) {
-    if (item === 'pill' && grade) {
-      const cost = grade * 15
-      if ((this.state.inventory.daoling ?? 0) < cost) { this.setNotice('论道令不足'); return }
-      this.state.inventory.daoling -= cost
-      this.state.inventory[`pill${grade}`] = (this.state.inventory[`pill${grade}`] ?? 0) + 1
-      this.setNotice(`兑换 ${grade} 品丹药 ×1`)
+  /**
+   * 论道令商店兑换。
+   *
+   * 价目一律读 data.ts 的 labPillCost / LAB_ESSENCE_COST / LAB_HERB_COST —— 界面显示的是同一处，
+   * 两边不可能漂。品阶合法性也从 PILLS 表查，而不是拿裸数字拼 `pill${grade}` 当键
+   * （拼错会往库存里写一个谁也不认识的 `pill9`，看着扣了令却没东西到手）。
+   *
+   * 论道令不足时**直接返回、不扣令也不发货**（负对照由 verify-lab-pill-shop 守着）。
+   */
+  buyLabShop(item: 'pill' | 'essence' | 'herb', grade?: number) {
+    const inv = this.state.inventory
+    if (item === 'pill') {
+      const pill = PILLS.find(p => p.grade === grade)
+      if (!pill) return
+      const cost = labPillCost(pill.grade)
+      if ((inv.daoling ?? 0) < cost) { this.setNotice('论道令不足'); return }
+      inv.daoling -= cost
+      inv[pill.id] = (inv[pill.id] ?? 0) + 1
+      this.setNotice(`兑换 ${pill.name} ×1`)
     } else if (item === 'essence') {
-      const cost = 10
-      if ((this.state.inventory.daoling ?? 0) < cost) { this.setNotice('论道令不足'); return }
-      this.state.inventory.daoling -= cost
-      this.state.inventory.essence = (this.state.inventory.essence ?? 0) + 20
-      this.setNotice('兑换武魂精血 ×20')
+      if ((inv.daoling ?? 0) < LAB_ESSENCE_COST) { this.setNotice('论道令不足'); return }
+      inv.daoling -= LAB_ESSENCE_COST
+      inv.essence = (inv.essence ?? 0) + LAB_ESSENCE_AMOUNT
+      this.setNotice(`兑换武魂精血 ×${LAB_ESSENCE_AMOUNT}`)
+    } else if (item === 'herb') {
+      // 灵药这一档的价目有一条硬约束（1 令 ≤ ≈7.5 灵药，否则丹药直购会被架空）——
+      // 完整推导写在 data.ts 的 LAB_HERB_COST 上，改价去那里改。
+      if ((inv.daoling ?? 0) < LAB_HERB_COST) { this.setNotice('论道令不足'); return }
+      inv.daoling -= LAB_HERB_COST
+      inv.herb = (inv.herb ?? 0) + LAB_HERB_AMOUNT
+      this.setNotice(`兑换灵药 ×${LAB_HERB_AMOUNT}`)
     }
     this.emit()
   }
@@ -1554,7 +1876,8 @@ class GameStore {
     const results: { id: string; isNew: boolean; rarity: Rarity; pity: boolean; shard: number; essence: number }[] = []
     for (let i = 0; i < times; i++) {
       const { rarity, pity } = this.rollRarity()
-      const pool = CHARACTERS.filter(c => c.rarity === rarity)
+      // 池子走 data.recruitPoolOf：限时联动角色只在活动期内进池（见那里的注释）
+      const pool = recruitPoolOf(rarity)
       const pick = pool[Math.floor(Math.random() * pool.length)]
       if (!pick) continue
       const isNew = !this.state.roster[pick.id]
@@ -1578,6 +1901,8 @@ class GameStore {
       const best = results.reduce((a, b) => order[b.rarity].order > order[a.rarity].order ? b : a)
       playSound(order[best.rarity].order >= 4 ? 'gachaHigh' : order[best.rarity].order >= 2 ? 'gachaMid' : 'gachaLow')
     }
+    // 活动中心：十连记 10 次（"招募次数"就是花掉的缘分丹数，与消耗口径一致）
+    this.bumpMetric('recruit', times)
     this.emit()
     return results
   }
@@ -1664,25 +1989,35 @@ class GameStore {
     this.setNotice(starTierIndex(entry.stars) > tierBefore
       ? `${cdef.name} 晋入 ${tier.name}！${entry.stars}★`
       : `${cdef.name} 突破至 ${entry.stars}★（${tier.name}）`)
+    this.bumpMetric('starup', 1)
     this.emit()
   }
 
   /**
-   * 角色碎片兑换：花 `SHARD_COST[品阶]` 枚碎片，换一名**指定的、尚未拥有**的角色。
+   * 角色碎片兑换：花 `shardCostOf(角色)` 枚碎片，换一名**指定的、尚未拥有**的角色
+   * （联动角色固定 100 枚，其余按品阶）。
    *
    * 只换未拥有的是刻意的——重复的角色已经有转化机制了，再允许用碎片换重复角色，
    * 系统就变成"碎片 → 角色 → 又抽到重复 → 更多碎片"的空转循环。
-   * 代价是集齐 54 名之后碎片失去出口，所以 UI 要在那时明确说明，别让玩家白攒。
+   * 代价是集齐之后碎片失去出口，所以 UI 要在那时明确说明，别让玩家白攒。
+   *
+   * 限时联动（v1.41）：活动结束后这两名不再可兑换。**只拦"还没拥有的"** ——
+   * 已经拥有的走上面那条"已在名录中"，不该给玩家看到"活动已结束"这种莫名其妙的理由。
    */
   redeemShard(charId: string): { ok: boolean; why?: string } {
     const cdef = CHAR_MAP[charId]
     if (!cdef) return { ok: false, why: '没有这名武魂' }
     if (this.state.roster[charId]) return { ok: false, why: `${cdef.name} 已在名录中` }
-    const need = SHARD_COST[cdef.rarity]
+    if (isLinkChar(charId) && !linkActive()) {
+      // 与界面同一句话（linkClosedText 按时段取词：活动前说"已结束"是假话，红线⑩）
+      return { ok: false, why: linkClosedText() }
+    }
+    const need = shardCostOf(cdef)
     if ((this.state.inventory.shard ?? 0) < need) return { ok: false, why: `角色碎片不足（需要 ${need} 枚）` }
     this.state.inventory.shard -= need
     this.state.roster[charId] = { level: 1, xp: 0, stars: 0, equip: {} }
-    this.setNotice(`✨ 碎片凝聚成形！获得${RARITY_INFO[cdef.rarity].label}「${cdef.name}」`)
+    this.bumpMetric('redeem', 1)
+    this.setNotice(`碎片凝聚成形！获得${RARITY_INFO[cdef.rarity].label}「${cdef.name}」`)
     this.emit()
     return { ok: true }
   }
@@ -1729,6 +2064,27 @@ class GameStore {
   }
 
   /**
+   * 扣一笔灵金，余额不够就**什么都不动**并返回 false。
+   *
+   * 为什么要有这么一个"通用付款"而不是各调用点自己减：**价钱不该在引擎里抄第二份**。
+   * 集结讨伐的「付费重启世界 Boss」价格由服务端随状态下发（`wb.restart.cost`），
+   * 这个项目反复踩「两份实现必然漂」的坑 —— 引擎里再写一个常数，改了服务端就会对不上账。
+   *
+   * 扣费成功即落盘并广播。**调用方负责决定"什么时候才该扣"**（见 WorldBossView 的 doRestart：
+   * 先请服务端点头、再动钱，被拒时一分钱都不该出去）。
+   */
+  spendCoin(amount: number): boolean {
+    const n = Math.floor(Number(amount) || 0)
+    if (n <= 0) return true
+    const coin = num(this.state.inventory.coin)
+    if (coin < n) return false
+    this.state.inventory.coin = coin - n
+    this.save()
+    this.emit()
+    return true
+  }
+
+  /**
    * 洗练一条额外词条的消耗。UI 要在按钮上明示——洗练是重复动作，不该每次再弹确认框。
    * 只消耗灵金，且按品阶固定：**洗第 N 次和洗第 1 次同价**，让玩家能自己算"还差多少灵金"。
    */
@@ -1741,6 +2097,9 @@ class GameStore {
    *
    * 只洗额外词条，先天词条一律不可洗 —— 理由见 data.ts 的 EQUIP_REFORGE。
    * 扣费在重掷之前完成，任一步失败都不落盘，不会出现"扣了钱没洗成"。
+   *
+   * v1.38.2：最高阶武器（canUndoReforge）在重掷前把**洗之前那条词条**记进 state.reforgeUndo，
+   * 玩家可以换回（见 undoReforge）。其余装备不记账，也不会清掉别人那份快照。
    */
   reforgeEquip(itemId: string, idx: number): ReforgeResult {
     const item = this.findEquip(itemId)
@@ -1750,14 +2109,133 @@ class GameStore {
     if (cost.coin <= 0) return { ok: false, why: '该品阶没有可洗练的词条' }
     const coin = num(this.state.inventory.coin)
     if (coin < cost.coin) return { ok: false, why: `灵金不足（需要 ${cost.coin}）` }
+    // 先取一份副本：下面 item.extra[idx] 是就地覆盖，prev 与它同引用的话快照会被写成新值
+    const prev = { ...item.extra[idx] }
     this.state.inventory.coin = coin - cost.coin
     item.extra[idx] = rollReforgedAffix(item.quality)
+    // 无论这次洗出什么，快照都指向**上一个**结果：可换回的机会始终只有一次，
+    // 每洗一次就往后滚一格。想留更早的结果就只能靠这次洗练之前先换回。
+    if (canUndoReforge(item)) this.state.reforgeUndo = { itemId: item.id, idx, from: prev }
+    this.bumpMetric('reforge', 1)
     this.save()
     this.emit()
     return { ok: true, affix: item.extra[idx] }
   }
 
-  // ── 装备评分与自动穿戴 ────────────────────────────────────────────────────
+  /**
+   * 这件装备当前能不能换回上一次洗练前的词条。UI 拿它决定要不要画对比条。
+   * 快照是全局唯一一份，所以必须核对 itemId —— 换过别的圣阶武器之后，
+   * 旧快照还在存档里躺着，不核对会让 A 的洗练结果显示在 B 上。
+   */
+  reforgeUndoOf(itemId: string): ReforgeUndo | null {
+    const snap = this.state.reforgeUndo
+    if (!snap || snap.itemId !== itemId) return null
+    return this.findEquip(itemId) ? snap : null
+  }
+
+  /**
+   * 换回上一次洗练前的词条（v1.38.2，仅最高阶武器）。
+   *
+   * **费用不退**：退费等于"花一次钱洗到满意为止"，会把洗练的灵金消耗整个架空
+   * （洗练本身是固定价、可无限次重复的动作，见 reforgeCost）。换回是一次性的后悔药，
+   * 用掉即消失——快照清空后不能再"反悔回新词条"。
+   */
+  undoReforge(itemId: string): ReforgeResult {
+    const snap = this.state.reforgeUndo
+    if (!snap || snap.itemId !== itemId) return { ok: false, why: '没有可换回的洗练记录' }
+    const item = this.findEquip(itemId)
+    // 装备已经不在了（被分解/被清理）：把这条死记录清掉，免得它一直挡着下一次记账
+    if (!item) {
+      this.state.reforgeUndo = null
+      this.save()
+      this.emit()
+      return { ok: false, why: '找不到这件装备' }
+    }
+    if (!item.extra?.[snap.idx]) return { ok: false, why: '没有这条词条（先天词条不可洗练）' }
+    item.extra[snap.idx] = { ...snap.from }
+    this.state.reforgeUndo = null
+    this.save()
+    this.emit()
+    return { ok: true, affix: item.extra[snap.idx] }
+  }
+
+  // ── 装备强化（v1.38）──────────────────────────────────────────────────────
+
+  /**
+   * 装备的当前强化等级。**唯一的读取口径**：缺字段（v1.38 之前掉的每一件）、
+   * 非有限值、超出该品阶上限，一律在这里收干净。UI 与战斗都走它，别自己读 `item.lv`。
+   */
+  equipLv(item: EquipItem): number {
+    if (!item || !Number.isFinite(item.lv)) return 0
+    return Math.max(0, Math.min(Math.floor(item.lv), equipEnhCap(item.quality)))
+  }
+
+  /**
+   * 强化的当前状态：等级 / 上限 / 下一级价目 / 是否满级（满级时 cost 为 0）。
+   * UI 一律读这里，别在组件里自己查 `EQUIP_ENHANCE[item.quality]` ——
+   * 上限、价目、倍率三样收在 data.ts 一处就够了，组件再拼一遍就是两份口径。
+   */
+  enhanceInfo(item: EquipItem) {
+    // 取不到装备时给一份"零级、零花费"的空壳，而不是让它在这里抛 `item.quality`。
+    // equipLv 早就对空值兜了底（`if (!item …) return 0`），这里漏掉就是同一件事有两个口径；
+    // 而本函数在 UI 的取值路径上，任何一次 undefined（分解后残留的引用、列表筛选期间的临时值）
+    // 都会把整个详情浮层连根打崩。
+    if (!item) return { lv: 0, cap: 0, maxed: true, cost: { crystal: 0, essence: 0 }, toMaxCost: { crystal: 0, essence: 0 }, refund: { crystal: 0, essence: 0 } }
+    const lv = this.equipLv(item)
+    const cap = equipEnhCap(item.quality)
+    const maxed = lv >= cap
+    const full = equipEnhSpent(item.quality, cap)
+    const done = equipEnhSpent(item.quality, lv)
+    return {
+      lv, cap, maxed,
+      cost: equipEnhCost(item.quality, lv),
+      // 「强化至满级」还差多少：Σ 逐级价。**界面只拿它当「强化至满级」按钮的够不够点判据**，
+      // 不把总价写给玩家看（用户："这不是需要披露给用户的"）；也不必让玩家自己加。
+      toMaxCost: maxed ? { crystal: 0, essence: 0 } : { crystal: full.crystal - done.crystal, essence: full.essence - done.essence },
+      // 分解这件会退多少强化材料（界面要在「分解可得」里写出来，别让玩家按投入自己估）
+      refund: equipEnhRefund(item.quality, lv),
+    }
+  }
+
+  /**
+   * 强化一件装备。背包里和**穿戴中**的都能强（同 findEquip，理由与洗练一样：
+   * 玩家不该为了强化先脱下来）。
+   *
+   * `times` 默认 1；传大值就是「强化到满级」。**逐级扣费、扣到哪级算哪级** ——
+   * 材料只够升 3 级就给 3 级并如实回报 `levels`，不是整批失败。这条语义是刻意的：
+   * 强化吃的是玩家挂机几十小时攒的结晶/精血，"差最后一级就一级都不升"只会让按钮变成摆设。
+   * `why` 仍然带回失败原因，UI 可以照样显示"精血不足"。
+   */
+  enhanceEquip(itemId: string, times = 1): EnhanceResult {
+    const item = this.findEquip(itemId)
+    if (!item) return { ok: false, levels: 0, why: '找不到这件装备' }
+    const cap = equipEnhCap(item.quality)
+    let lv = this.equipLv(item)
+    if (lv >= cap) return { ok: false, levels: 0, why: '已满级' }
+    const want = Math.max(1, Math.min(Math.floor(times) || 1, cap - lv))
+    const inv = this.state.inventory
+    let done = 0
+    let why: string | undefined
+    for (let i = 0; i < want; i++) {
+      const cost = equipEnhCost(item.quality, lv)
+      if ((inv.crystal ?? 0) < cost.crystal) { why = `斗气结晶不足（需要 ${cost.crystal}）`; break }
+      if ((inv.essence ?? 0) < cost.essence) { why = `武魂精血不足（需要 ${cost.essence}）`; break }
+      inv.crystal = (inv.crystal ?? 0) - cost.crystal
+      inv.essence = (inv.essence ?? 0) - cost.essence
+      lv += 1
+      done += 1
+    }
+    if (!done) return { ok: false, levels: 0, why: why ?? '材料不足' }
+    item.lv = lv
+    // 活动中心：按**真的强化成功了几级**记，而不是"点了几次"（一次点满是 1 次点击、N 级强化）
+    this.bumpMetric('enhance', done)
+    this.setNotice(`强化成功：${item.name} +${lv}`)
+    this.save()
+    this.emit()
+    return { ok: true, levels: done, why }
+  }
+
+  // ── 装备评分与自动穿戴 ─────────────────────────────────────────────────────
   private teamIds(): string[] {
     return [...this.state.team.front, ...this.state.team.back].filter((x): x is string => !!x)
   }
@@ -2075,18 +2553,41 @@ class GameStore {
   }
 
   // ── 装备分解：把堆积的低阶装备换成升星材料 ────────────────────────────────
-  /** 分解一件背包装备，产出武魂精血（天阶以上额外给玄晶） */
-  breakdownEquip(itemId: string): { essence: number; xuanjing: number } | null {
+  /**
+   * 分解一件背包装备，产出武魂精血（天阶以上额外给玄晶）。
+   *
+   * v1.38 起**另外退还该装备已投入强化材料的 70%**（见 data.ts 的 equipEnhRefund）：
+   * 满强化圣装是 2400 万结晶 + 4800 精血的投入，一次点错就归零是不可接受的；
+   * 但也不是全额退——全额退等于强化材料可以随意搬运，强化就不再是"这件装备"的投入了。
+   */
+  breakdownEquip(itemId: string): { essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } | null {
     const idx = this.state.equipBag.findIndex(i => i.id === itemId)
     if (idx < 0) return null
     const item = this.state.equipBag[idx]
     const gain = EQUIP_BREAKDOWN[item.quality]
     if (!gain) return null // 品阶无法识别的装备宁可留着也不销毁（理论上进不来，见 sanitizeEquipItem）
     this.state.equipBag.splice(idx, 1)
+    // 分解掉的正好是快照记着的那件 → 快照作废。留着的话，下一次洗练会把它顶掉（记账总是覆盖），
+    // 但在那之前 undoReforge 会先撞上"找不到这件装备"，白让玩家看见一个点不动的按钮。
+    if (this.state.reforgeUndo?.itemId === itemId) this.state.reforgeUndo = null
     this.state.inventory.essence = (this.state.inventory.essence ?? 0) + gain.essence
     if (gain.xuanjing) this.state.inventory.xuanjing = (this.state.inventory.xuanjing ?? 0) + gain.xuanjing
+    const refund = this.refundEnhance(item)
     this.emit()
-    return gain
+    return { essence: gain.essence, xuanjing: gain.xuanjing, ...refund }
+  }
+
+  /**
+   * 退还一件装备的强化投入（就地加进背包资源）。**分解的两个入口共用这一处**，
+   * 免得"单件分解退、一键分解不退"这种只在某条路径上成立的 bug。
+   */
+  private refundEnhance(item: EquipItem): { refundCrystal: number; refundEssence: number } {
+    const lv = this.equipLv(item)
+    if (lv <= 0) return { refundCrystal: 0, refundEssence: 0 }
+    const r = equipEnhRefund(item.quality, lv)
+    if (r.crystal) this.state.inventory.crystal = (this.state.inventory.crystal ?? 0) + r.crystal
+    if (r.essence) this.state.inventory.essence = (this.state.inventory.essence ?? 0) + r.essence
+    return { refundCrystal: r.crystal, refundEssence: r.essence }
   }
 
   /**
@@ -2106,22 +2607,28 @@ class GameStore {
     return true
   }
 
-  /** 一键分解所有垃圾装备 */
-  breakdownJunk(): { count: number; essence: number; xuanjing: number } {
-    let count = 0, essence = 0, xuanjing = 0
+  /** 一键分解所有垃圾装备（强化过的会连带退还材料，与单件分解同一条路径） */
+  breakdownJunk(): { count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } {
+    let count = 0, essence = 0, xuanjing = 0, refundCrystal = 0, refundEssence = 0
     const keep: EquipItem[] = []
     for (const item of this.state.equipBag) {
       const g = EQUIP_BREAKDOWN[item.quality]
       if (!g) { keep.push(item); continue } // 品阶无法识别 → 留着
       if (!this.isJunkEquip(item)) { keep.push(item); continue }
       count++; essence += g.essence; xuanjing += g.xuanjing
+      const r = this.refundEnhance(item)
+      refundCrystal += r.refundCrystal; refundEssence += r.refundEssence
     }
-    if (!count) return { count: 0, essence: 0, xuanjing: 0 }
+    if (!count) return { count: 0, essence: 0, xuanjing: 0, refundCrystal: 0, refundEssence: 0 }
     this.state.equipBag = keep
+    // 与单件分解同理：快照记的那件被一键分解吃掉 → 快照作废。
+    // **不能用 keep 里找不找得到来判断** —— 一键分解只动背包，而快照记的完全可以是
+    // 某位角色身上穿着的武器（洗练本就支持穿戴中装备），那件永远不在 keep 里。
+    if (this.state.reforgeUndo && !this.findEquip(this.state.reforgeUndo.itemId)) this.state.reforgeUndo = null
     this.state.inventory.essence = (this.state.inventory.essence ?? 0) + essence
     if (xuanjing) this.state.inventory.xuanjing = (this.state.inventory.xuanjing ?? 0) + xuanjing
     this.emit()
-    return { count, essence, xuanjing }
+    return { count, essence, xuanjing, refundCrystal, refundEssence }
   }
 
   // ── 炼丹（灵药+灵金 → 指定品阶丹药，缓解突破材料瓶颈）───────────────────────
@@ -2136,7 +2643,8 @@ class GameStore {
     this.state.inventory.herb -= cost.herb
     this.state.inventory.coin -= cost.coin
     this.state.inventory[pill.id] = (this.state.inventory[pill.id] ?? 0) + 1
-    this.setNotice(`炼成 ${pill.icon}${pill.name} ×1`)
+    this.bumpMetric('craft', 1)
+    this.setNotice(`炼成 ${pill.name} ×1`)
     this.emit()
   }
 
@@ -2155,7 +2663,9 @@ class GameStore {
 
   /** 跨天则清空当日购买计数，价格回落到基准（纯价格限制，不设次数上限） */
   private ensureShopDay() {
-    const today = new Date().toDateString()
+    // 日期口径走 activities.todayKey —— **全站只有这一个**（活动中心的"今日/跨天"也走它）。
+    // 两处各写一份的话，哪天给其中一处加了时区处理，"签到说今天签过了、商城说今天还没买"就来了。
+    const today = todayKey()
     if (this.state.shop.date !== today) this.state.shop = { date: today, counts: {} }
   }
 
@@ -2176,9 +2686,10 @@ class GameStore {
     if ((this.state.inventory.coin ?? 0) < price) { this.setNotice('灵金不足'); return }
     this.state.inventory.coin -= price
     this.state.shop.counts[goodId] = (this.state.shop.counts[goodId] ?? 0) + 1
+    this.bumpMetric('shop', 1)
     if (g.kind === 'material' && g.item) {
       this.state.inventory[g.item] = (this.state.inventory[g.item] ?? 0) + (g.amount ?? 1)
-      this.setNotice(`购得 ${itemLabel(g.item).icon}${itemLabel(g.item).name} ×${g.amount ?? 1}`)
+      this.setNotice(`购得 ${itemLabel(g.item).name} ×${g.amount ?? 1}`)
     } else if (g.kind === 'buff' && g.buffId) {
       const def = SHOP_BUFFS.find(x => x.id === g.buffId)
       if (def) {
@@ -2188,13 +2699,13 @@ class GameStore {
         const expireAt = from + def.minutes * 60000
         if (existing) existing.expireAt = expireAt
         else this.state.buffs.push({ id: def.id, expireAt })
-        this.setNotice(`${def.icon} ${def.name} 生效 ${def.minutes} 分钟`)
+        this.setNotice(`${def.name} 生效 ${def.minutes} 分钟`)
       }
     } else if (g.kind === 'equip') {
       const slot = EQUIP_SLOTS[Math.floor(Math.random() * EQUIP_SLOTS.length)]
       const item = rollEquip(slot, rollEquipQuality())
       this.state.equipBag.push(item)
-      this.setNotice(`🎁 购得装备：${item.name}`)
+      this.setNotice(`购得装备：${item.name}`)
     }
     this.emit()
   }
@@ -2207,6 +2718,11 @@ export function useGame(): GameState {
   return useSyncExternalStore(game.subscribe, game.getSnapshot)
 }
 
+// ── 关于 `ITEM_INFO[*].icon` 里那些 emoji（v1.44）────────────────────────────
+// **不删，故意的。** 它们现在的身份是「素材缺失时的回落字形」，由 `<Ico emoji={...}>` 消费；
+// 同时 `itemLabel().icon` 还被若干**纯文本**路径拼接（战斗日志、setNotice、活动奖励串），
+// 在那里塞一个 `icons/coin` 路径会当场打印出路径本身。
+// UI 上要显示图标请走 `<Ico name={itemSprite(id)} emoji={itemLabel(id).icon} />`，别自己拼字符串。
 export function itemLabel(id: string): { name: string; icon: string } {
   return ITEM_INFO[id] ?? { name: id, icon: '📦' }
 }
@@ -2266,19 +2782,132 @@ export function pillCraftCost(grade: number): { herb: number; coin: number } {
 }
 
 // ── 卡关引导：读实际库存/进度算出具体可执行的建议，而不是空泛提示 ──────────────
-export interface Guide { icon: string; text: string; tab: 'roster' | 'shop' | 'recruit' }
+/**
+ * `kind` 是**这条建议在讲哪件事**的显式标记，不是给人看的文案。
+ * 它存在的唯一理由是下面那条去重判断 —— 老写法是 `out.every(g => g.icon !== '💊')`，
+ * 靠**比较一个 emoji 字符串**来判断"已经有一条丹药建议了"。图标体系一升级（emoji → 素材键），
+ * 那个比较会**静默失效**：不报错、不崩溃，只是从此每局多推一条重复建议。
+ * 用 `kind` 之后，改图标与改判断彻底无关。
+ */
+export type GuideKind = 'stuck' | 'stalemate' | 'pill' | 'crystal' | 'yuanfen' | 'craft'
+export interface Guide {
+  kind: GuideKind
+  /** 生图素材键（如 `icons/crystal`）。抽象建议（卡关/僵持）没有具体形象，留空由视图给 lucide 图标 */
+  spr?: string
+  text: string
+  tab: 'roster' | 'shop' | 'recruit'
+}
+
+// ── 新手三步（v1.32）──────────────────────────────────────────────────────
+/**
+ * 新玩家开局的三步引导：**先赢一场 → 升到 2 级 → 抽一次**。
+ *
+ * 为什么是这三步：新号打开游戏落在阵容页（全站最复杂的一页），场上没有角色、
+ * 也没有战斗在跑——一个挂机游戏的核心承诺（挂机变强）一次都没演示。这三步按
+ * 「看到战斗 → 亲手变强一次 → 认识抽卡」排，每一步都有立刻能做的动作。
+ *
+ * **完成判据全部由现有存档状态推导，不新增存档字段**（存档结构是红线，能不加就不加）：
+ * - 第一步 `kills`（战斗页累加，新号从 0 开始）
+ * - 第二步 任一角色 `level >= 2`（打坐修炼 / 战斗结算都会涨）
+ * - 第三步 见下方 `pulled`，三条痕迹取并集
+ *
+ * ️ 第三步的判据要能覆盖**抽卡的每一种结局**，否则玩家会遇到"我抽了但它不勾"：
+ * 抽到新角色 ⇒ roster 变长；抽到重复 ⇒ 低阶给武魂精血、准圣/圣给碎片（见 recruit 的分支，
+ * 两者必有其一）。再加上三层保底计数——只要抽过一次，至少有一个计数器非 0。
+ * 三条并集下来不存在"抽了但判不出"的结局。
+ *
+ * 三步全部完成即返回 null，整条收起，不再打扰。
+ */
+export interface NewbieStep {
+  key: 'battle' | 'train' | 'recruit'
+  /** 生图素材键。三步各自的形象：开战借塔内祝福的剑、修炼花的是斗气结晶、招募花的是缘分丹 */
+  spr: string
+  /** 这一步要玩家做什么（动词开头，一句话） */
+  text: string
+  /** 点「去做」跳到哪一页 */
+  tab: 'combat' | 'roster' | 'recruit'
+  done: boolean
+  /**
+   * 现在能不能立刻做。false 不是错误态，只是"条件还没到"——
+   * 界面这时显示 `hint` 里的实时进度（如「斗气结晶 12/20」），而不是一个点了没反应的按钮。
+   * 新号开局结晶为 0，第一级要 20 点、挂机 1.2/秒 ≈ 17 秒，这段等待与第一步的
+   * 首场战斗是并行跑的，所以进度条比倒计时文案更贴合玩家实际感受。
+   */
+  ready: boolean
+  hint?: string
+  /** 就绪时按钮上的文案 */
+  action: string
+  /** 跳到 roster 时预选哪名角色（第二步用：刚上阵那位，刚打完第一场接着养他顺理成章） */
+  focus?: string
+}
+
+export function newbieSteps(state: GameState): NewbieStep[] | null {
+  const battleDone = state.kills >= 1
+  const trainDone = Object.values(state.roster).some(e => e.level >= 2)
+  const pulled =
+    Object.keys(state.roster).length > STARTER_IDS.length ||
+    (state.inventory.essence ?? 0) > 0 ||
+    (state.inventory.shard ?? 0) > 0 ||
+    state.pityTian > 0 || state.pityQuasi > 0 || state.pitySheng > 0
+
+  if (battleDone && trainDone && pulled) return null
+
+  // 第二步的样板角色：优先取阵上第一个（前排优先）。取不到就退回名录第一人，
+  // 保证 roster 非空时一定给得出一个可修炼的对象——引导不能指到一个空面板上。
+  const focus = state.team.front.find(Boolean) ?? state.team.back.find(Boolean) ?? Object.keys(state.roster)[0]
+  const entry = focus ? state.roster[focus] : undefined
+  const crystal = Math.floor(state.inventory.crystal ?? 0)
+  const need = entry ? xpToNext(entry.level) : 0
+  const dan = Math.floor(state.inventory.yuanfen ?? 0)
+
+  return [
+    {
+      key: 'battle', spr: 'blessings/sword', tab: 'combat',
+      text: '点一下开战，先赢下一场',
+      done: battleDone, ready: true,
+      action: state.autoBattle ? '自动出战中…' : '开启自动出战',
+    },
+    {
+      key: 'train', spr: 'icons/crystal', tab: 'roster',
+      text: '用斗气结晶给一名角色打坐修炼，升到 2 级',
+      done: trainDone,
+      ready: !!entry && crystal >= need,
+      hint: entry && crystal < need ? `斗气结晶 ${crystal}/${need} · 挂机自动累积` : undefined,
+      action: entry ? `去给${CHAR_MAP[focus]?.name ?? '他'}修炼` : '去阵容页',
+      focus,
+    },
+    {
+      key: 'recruit', spr: 'icons/yuanfen', tab: 'recruit',
+      text: '去招募抽一次，看能遇到谁',
+      done: pulled,
+      ready: dan >= 1,
+      hint: dan < 1 ? `缘分丹 ${dan}/1 · 每 5 关首领首通给 1 颗` : undefined,
+      action: dan >= 10 ? '去招募（十连必出天阶）' : '去招募',
+    },
+  ]
+}
+
+/**
+ * 当前该做的那一步(第一个没完成的),三步走完返回 null。
+ *
+ * 引导条与各页面上的**呼吸灯高亮**共用这一处判断 —— 呼吸灯只该亮在同一个按钮上,
+ * 两处各判一次必然漂(这正是 v1.21.4/1.29 那类"同一件事两份实现"的老坑)。
+ */
+export function newbieCurrent(state: GameState): NewbieStep | null {
+  return newbieSteps(state)?.find(s => !s.done) ?? null
+}
 
 export function nextGuides(state: GameState): Guide[] {
   const out: Guide[] = []
 
   if (state.farmStage === null) {
     if (state.wipeStreak >= 2) {
-      out.push({ icon: '⚠️', text: `连续卡在第 ${state.stage} 关 ${state.wipeStreak} 次了，去「选择关卡」回旧关练级或强化队伍`, tab: 'roster' })
+      out.push({ kind: 'stuck', text: `连续卡在第 ${state.stage} 关 ${state.wipeStreak} 次了，去「选择关卡」回旧关练级或强化队伍`, tab: 'roster' })
     } else if (state.battle && Date.now() - state.lastProgressAt > 3 * 60 * 1000) {
       // 僵持卡关：伤害有 1 点保底、治疗又抵得住反击，于是既打不死也死不了，
       // wipeStreak 恒为 0 —— 这是后期最难受的状态，但原先完全不给任何提示
       const mins = Math.floor((Date.now() - state.lastProgressAt) / 60000)
-      out.push({ icon: '🐢', text: `第 ${state.stage} 关磨了 ${mins} 分钟没推进，去「选择关卡」回旧关练级再回来`, tab: 'roster' })
+      out.push({ kind: 'stalemate', text: `第 ${state.stage} 关磨了 ${mins} 分钟没推进，去「选择关卡」回旧关练级再回来`, tab: 'roster' })
     }
   }
 
@@ -2289,7 +2918,7 @@ export function nextGuides(state: GameState): Guide[] {
       const grade = pillGradeFor(entry.level)
       const have = state.inventory[`pill${grade}`] ?? 0
       if (have < 1) {
-        out.push({ icon: '💊', text: `${CHAR_MAP[id]?.name ?? id} 卡在突破口，需要 ${grade} 品丹药，去商城丹房炼一颗`, tab: 'shop' })
+        out.push({ kind: 'pill', spr: `icons/pill${grade}`, text: `${CHAR_MAP[id]?.name ?? id} 卡在突破口，需要 ${grade} 品丹药，去商城丹房炼一颗`, tab: 'shop' })
         break
       }
     }
@@ -2297,21 +2926,22 @@ export function nextGuides(state: GameState): Guide[] {
 
   const crystal = state.inventory.crystal ?? 0
   if (crystal >= 150) {
-    out.push({ icon: '💎', text: `攒了 ${Math.floor(crystal)} 点斗气结晶还没用，去阵容页给角色打坐修炼`, tab: 'roster' })
+    out.push({ kind: 'crystal', spr: 'icons/crystal', text: `攒了 ${Math.floor(crystal)} 点斗气结晶还没用，去阵容页给角色打坐修炼`, tab: 'roster' })
   }
 
   const yuanfen = state.inventory.yuanfen ?? 0
   if (yuanfen >= 5) {
-    out.push({ icon: '🎴', text: `攒了 ${yuanfen} 颗缘分丹，去结拜抽个新武将说不定能带飞`, tab: 'recruit' })
+    out.push({ kind: 'yuanfen', spr: 'icons/yuanfen', text: `攒了 ${yuanfen} 颗缘分丹，去招募抽个新武将说不定能带飞`, tab: 'recruit' })
   }
 
   const herb = state.inventory.herb ?? 0
   const coin = state.inventory.coin ?? 0
-  if (out.every(g => g.icon !== '💊')) {
+  // ⚠️ 判据用 `kind`，不是图标 —— 见 `GuideKind` 的注释：比字符串的老写法会被图标升级静默打断
+  if (out.every(g => g.kind !== 'pill')) {
     for (const pill of PILLS) {
       const cost = pillCraftCost(pill.grade)
       if (herb >= cost.herb && coin >= cost.coin && (state.inventory[pill.id] ?? 0) < 1) {
-        out.push({ icon: '🌿', text: `灵药灵金够炼一颗${pill.name}了，去商城丹房备着`, tab: 'shop' })
+        out.push({ kind: 'craft', spr: `icons/pill${pill.grade}`, text: `灵药灵金够炼一颗${pill.name}了，去商城丹房备着`, tab: 'shop' })
         break
       }
     }

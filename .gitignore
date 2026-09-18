@@ -10,6 +10,10 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+# 双基座构建的临时产物（正式 /doupo/ 与体验 /doupo-test/ 各一份，只用于本地对比验证）
+# 用 dist-*/ 通配而不是逐个列举：这些都是**构建产物**，而本仓库是**公开仓库**，
+# 漏列一个（dist-test-recheck/、dist-vtmp/ 就这么漏过）就会在一次 `git add -A` 里被推上去。
+dist-*/
 *.local
 
 # 密钥/备份文件，不进仓库

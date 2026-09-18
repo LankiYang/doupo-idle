@@ -37,8 +37,18 @@ function stageStats(s) { const b = isBoss(s) ? 1.6 : 1; return {
   def: Math.max(0, Math.floor(1 * Math.pow(1.085, s) * b)) } }
 const coinReward = s => Math.floor(8 + s * 5)
 const ROUND_SEC = 2
+// 星级系数：镜像 src/game/data.ts 的 starMultOf（唯一权威在那儿）。
+// v1.34：每星加成 8/6/4/3/2% 逐档递减 + 跨档 +10%；跃升次数取 clamp(floor(s/10),0,4)。
+const starMult = (s) => {
+  const t = Math.min(4, Math.max(0, Math.floor(s / 10)))
+  const per = [0.08, 0.06, 0.04, 0.03, 0.02]
+  let g = 0
+  for (let i = 0; i < t; i++) g += 10 * per[i]
+  g += (s - t * 10) * per[t]
+  return 1 + g + 0.1 * t
+}
 function cs(e, cd, fire) {
-  const sm = 1 + e.stars * 0.08
+  const sm = starMult(e.stars)
   let atk = (cd.baseAtk + cd.atkGrowth * e.level) * sm, d = (cd.baseDef + cd.defGrowth * e.level) * sm, hp = (cd.baseHp + cd.hpGrowth * e.level) * sm
   if (fire) { atk *= 1 + (fire.atk ?? 0) / 100; d *= 1 + (fire.def ?? 0) / 100; hp *= 1 + (fire.hp ?? 0) / 100 }
   return { atk: Math.round(atk), def: Math.round(d), hp: Math.round(hp) }
