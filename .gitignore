@@ -31,6 +31,16 @@ dist-*/
 .backup-sprites-png/
 *.pocketbak
 
+# 同类：**美术素材的中间产物**，与运行无关，全是"生图/改图过程里留下的那一版"。
+# 判据是「有没有被源码引用」——`boss2/*.webp` 有（monsters.ts 的 import.meta.glob），
+# 下面这些一个都没有：`generated/` 是各轮生图的候选图，`poster-v2/v3.png` 是海报定稿前
+# 的两版，`sprites/src/` 更是路径写错建出来的嵌套空壳（`sprites/src/assets/sprites/…`）。
+# 一并锁住：这批东西合计 7MB+，且每做一次美术就会再多几个。
+.backup-sprites-webp/
+src/assets/sprites/generated/
+src/assets/sprites/src/
+src/assets/sprites/link/poster-v*.png
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

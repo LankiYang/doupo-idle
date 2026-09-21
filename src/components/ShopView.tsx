@@ -46,7 +46,7 @@ export default function ShopView() {
             {count > 0 && <span className="ml-1 text-[10px] text-[#5a4a38]">今日第 {count + 1} 件</span>}
           </span>
           <button onClick={() => game.buyShopItem(g.id)} disabled={!canAfford}
-            className="shrink-0 rounded bg-dq-gold px-2.5 py-1 text-black disabled:opacity-30">购买</button>
+            className="dq-tap-lg inline-flex shrink-0 items-center justify-center rounded bg-dq-gold px-2.5 py-1 text-black disabled:opacity-30">购买</button>
         </div>
       </div>
     )

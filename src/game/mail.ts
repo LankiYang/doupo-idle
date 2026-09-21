@@ -7,6 +7,7 @@
 //
 // 与 rewards 的另一处区别：奖励是**自动到账**（开局就发），邮件是**手动领取** ——
 // 玩家得打开邮箱点一下，这才叫"发了公告"，否则没人会看到正文。
+import { apiFetch } from './authApi'
 import { ITEM_INFO } from './data'
 import { getPlayerId } from './leaderboardApi'
 
@@ -96,7 +97,7 @@ export function parseMails(raw: unknown): Mail[] {
 
 /** 拉邮件。网络失败/服务没起来一律返回空数组——邮箱拉不到不该影响游戏本身 */
 export async function fetchMails(): Promise<Mail[]> {
-  const res = await fetch(`${API}?playerId=${encodeURIComponent(getPlayerId())}`, { cache: 'no-store' })
+  const res = await apiFetch(`${API}?playerId=${encodeURIComponent(getPlayerId())}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return parseMails(await res.json())
 }

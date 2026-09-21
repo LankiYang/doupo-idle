@@ -44,7 +44,8 @@ function LabFighterCard({ id, state, now }: { id: string | null; state: GameStat
       {hitEvent && <ImpactFx src={impactFxForMonster(hitEvent.atkStyle ?? 'melee')} />}
       {isHealed && <ImpactFx src={healFx()} />}
       {debuffed && <DebuffBadge className="-right-1 -top-1" />}
-      <div className="truncate px-0.5" style={{ color: rarityInfo(cdef.rarity).color }}>{cdef.name.slice(0, 3)}</div>
+      {/* 名字：原来 `slice(0, 3)` 硬截（同 RosterView）——已有 `truncate`，交给格子宽度 */}
+      <div className="truncate px-0.5" style={{ color: rarityInfo(cdef.rarity).color }}>{cdef.name}</div>
       <div className="mx-1 mb-1 h-1 rounded bg-black/40">
         <div className="h-1 rounded bg-green-600 transition-[width] duration-300 ease-out" style={{ width: `${Math.max(0, (hp / maxHp) * 100)}%` }} />
       </div>
@@ -205,7 +206,10 @@ export default function LabView() {
               {e.type === 'monsterDmg' && `${enemyName(e.from)} 对 ${charLabel(e.who!)?.name ?? ''} 造成 ${e.value} 伤害`}
               {e.type === 'down' && `${charLabel(e.who!)?.name ?? ''} 倒下了`}
               {e.type === 'kill' && `突破 ${e.who}！`}
-              {e.type === 'drop' && `首通奖励 ${itemLabel(e.item!).name} ×${e.value}`}
+              {/* 同一类 drop 事件有两种说法：论道令 / 缘分丹是**首通限定**（`first`），
+                  每层的灵药是**常驻掉落**。写成一样的话，玩家每层都会看到"首通奖励 灵药"
+                  —— 而他没有首通。判据是引擎给的 `first`，不在这里猜 item 名字。 */}
+              {e.type === 'drop' && `${e.first ? '首通奖励' : '获得'} ${itemLabel(e.item!).name} ×${e.value}`}
             </div>
           ))}
         </div>
@@ -235,7 +239,7 @@ function LabShop() {
           return (
             <button key={pill.id} onClick={() => game.buyLabShop('pill', pill.grade)}
               data-shop-item={`pill-${pill.grade}`}
-              className={`flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${afford ? 'hover:border-dq-gold' : 'opacity-50'}`}>
+              className={`dq-tap flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${afford ? 'hover:border-dq-gold' : 'opacity-50'}`}>
               <span className="flex items-center gap-1.5">
                 <Ico name={itemSprite(pill.id)} emoji={pill.icon} className="h-5 w-5" />
                 <span>{pill.name} ×1</span>
@@ -247,7 +251,7 @@ function LabShop() {
         })}
         <button onClick={() => game.buyLabShop('essence')}
           data-shop-item="essence"
-          className={`flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${daoling >= LAB_ESSENCE_COST ? 'hover:border-dq-gold' : 'opacity-50'}`}>
+          className={`dq-tap flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${daoling >= LAB_ESSENCE_COST ? 'hover:border-dq-gold' : 'opacity-50'}`}>
           <span className="flex items-center gap-1.5">
             <Ico name={itemSprite('essence')} className="h-5 w-5" />
             <span>武魂精血 ×{LAB_ESSENCE_AMOUNT}</span>
@@ -259,7 +263,7 @@ function LabShop() {
             丹药那 8 档就没人点了。推导写在 data.ts 的 LAB_HERB_COST 上。 */}
         <button onClick={() => game.buyLabShop('herb')}
           data-shop-item="herb"
-          className={`flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${daoling >= LAB_HERB_COST ? 'hover:border-dq-gold' : 'opacity-50'}`}>
+          className={`dq-tap flex w-full items-center justify-between rounded border border-dq-border px-2 py-1 text-xs ${daoling >= LAB_HERB_COST ? 'hover:border-dq-gold' : 'opacity-50'}`}>
           <span className="flex items-center gap-1.5">
             <Ico name={itemSprite('herb')} className="h-5 w-5" />
             <span>灵药 ×{LAB_HERB_AMOUNT}</span>

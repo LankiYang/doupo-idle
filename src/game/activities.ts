@@ -82,9 +82,68 @@ export interface ActivityDef {
   /** 展示排序，小的在前；相同则按配置文件里的先后 */
   order: number
   enabled: boolean
+  /**
+   * 奖励是否随**最高关卡**放大（v1.47）。缺省关闭 —— 不开的条目走的就是老行为，逐字节相同。
+   *
+   * 为什么要这个：在线/签到这类日常活动的奖励是**写死的绝对数**，而主线产出是随关卡长的
+   * （击杀灵金 `8 + 关卡×5`、击杀结晶按 `1.095^关卡` 指数增长）。于是同一个"在线 2 小时"，
+   * 对 5 关的新人是笔收入，对 140 关的老玩家是"点不点都一样" ——
+   * 玩家原话：「对后期的用户几千的资源没有意义」。
+   *
+   * 倍数曲线见 `activityScaleOf`。**发放与界面都必须走 `scaledItems`**。
+   */
+  scaleByStage: boolean
 }
 
 export const ACTIVITIES_URL = `${import.meta.env.BASE_URL}activities/activities.json`
+
+/**
+ * **不随关卡放大**的奖励。
+ *
+ * 2026-09-20 用户：「活动的等级加成对于缘分丹不要有加成 这个不涉及数值增长」。
+ *
+ * 为什么单独列出来：`coin / crystal / herb / daoling / essence` 都是**会随进度增长的资源**
+ * —— 关卡越高，产出越大，活动奖励跟着涨才追得上（见 `scaleByStage` 的注释）。
+ * 而 `yuanfen`（缘分丹）是**按颗数**的招募货币：**一颗丹 = 一次招募**，是"抽卡次数"这个量纲。
+ * 把它跟着关卡乘，等于直接多发抽卡次数 —— 那是另一码事，不该搭这趟车。
+ *
+ * ⚠️ **名单只此一处。** 发放（`claimActivity`）与界面（`activityRewardOf`）都走 `scaledItems`；
+ *    `ActivityView` 只是拿它决定"要不要在界面上说明哪一样不参与"，**不许再抄第二份**。
+ *    要再加不参与放大的物品，只改这一行。
+ */
+export const ACTIVITY_NO_SCALE: readonly string[] = ['yuanfen']
+
+/**
+ * 奖励随关卡放大的曲线参数：**每 15 关 +1 倍**，封顶 20 倍。
+ *   · 0~14 关 ×1（新人的量**一点没变**，这一版对他们逐字节等价）
+ *   · 60 关 ×5、120 关 ×9、185 关 ×13
+ * 用整数阶跃而不是连续曲线，是为了让玩家看得懂"关卡涨一档、活动就给多一档"；
+ * 封顶是防手滑 —— 关卡没有上限，倍数没有上限的话迟早会滚出一个荒唐的数。
+ */
+export const ACTIVITY_SCALE_PER_STAGE = 15
+export const ACTIVITY_SCALE_MAX = 20
+
+/**
+ * 某个最高关卡对应的奖励倍数。**收口在这里**：发放（engine.claimActivity）与界面展示
+ * 引的是同一个函数 —— "界面写 800、到账 10640"（或反过来）是玩家会截图来问的那类 bug。
+ */
+export function activityScaleOf(highestStage: number): number {
+  const s = Number.isFinite(highestStage) ? Math.max(0, Math.floor(highestStage)) : 0
+  return Math.min(ACTIVITY_SCALE_MAX, 1 + Math.floor(s / ACTIVITY_SCALE_PER_STAGE))
+}
+
+/** 一条活动**实际会发**的那份奖励。没开放大的原样返回（连对象都不重建） */
+export function scaledItems(a: ActivityDef, highestStage: number): Record<string, number> {
+  if (!a.scaleByStage) return a.items
+  const m = activityScaleOf(highestStage)
+  const out: Record<string, number> = {}
+  // ⚠️ 倍数只作用在**会随进度增长**的那些资源上；`ACTIVITY_NO_SCALE` 里的原样带过去。
+  //    别顺手改成"全都乘" —— 那正是用户在 2026-09-20 让改掉的东西（缘分丹 = 抽卡次数）。
+  for (const k of Object.keys(a.items)) {
+    out[k] = ACTIVITY_NO_SCALE.includes(k) ? a.items[k] : a.items[k] * m
+  }
+  return out
+}
 
 /**
  * 本地日期键。**全站只有这一个日期口径**（商城跨天回落也走它）——
@@ -170,6 +229,9 @@ export function parseActivities(raw: unknown): ActivityDef[] {
       endAt,
       order: Number.isFinite(Number(o.order)) ? Number(o.order) : 0,
       enabled: o.enabled !== false,
+      // 只有**严格等于 true** 才开：写 "false"/0/"yes" 都按关走。
+      // 这个开关会直接乘到发放量上，宁可让它"没生效"也不能让它"意外生效"。
+      scaleByStage: o.scaleByStage === true,
     })
   }
   // 排序收口在这里：界面不必再排一次（两处各排一次，改排序规则时必然只改一处）

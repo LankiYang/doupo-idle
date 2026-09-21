@@ -262,7 +262,17 @@ export default function EquipmentView() {
   const state = useGame()
   const teamIds = [...state.team.front, ...state.team.back].filter((x): x is string => !!x)
   const [selectedChar, setSelectedChar] = useState<string | null>(teamIds[0] ?? null)
-  const [peekItem, setPeekItem] = useState<EquipItem | null>(null)
+  /**
+   * 详情浮层看的是哪件装备 —— **存 id，不存对象引用**。
+   *
+   * ⚠️ 这里原先是 `useState<EquipItem|null>`，注释还写着"peekItem 是 state 里的同一个对象引用，
+   *    引擎就地改写了它，所以浮层会跟着更新"。**那句在远程模式下不成立**：服务端回的增量是
+   *    JSON 解出来的**新对象**，`equipBag` 整个被换掉，旧引用从此冻在那一刻 ——
+   *    洗练完、强化完，浮层里的词条/等级还是洗之前的（**静默错，玩家看不出来**）。
+   *    改成每次渲染从当前 state 里重新找一遍，两个模式都对。
+   */
+  const [peekId, setPeekId] = useState<string | null>(null)
+  const peekItem = peekId ? game.findEquip(peekId) : null
   const [junkPreview, setJunkPreview] = useState<{ count: number; essence: number; xuanjing: number } | null>(null)
   const [toast, setToast] = useState<DetailMsg | null>(null)
   const [reforgeMsg, setReforgeMsg] = useState<DetailMsg | null>(null)
@@ -288,17 +298,18 @@ export default function EquipmentView() {
   function openItem(item: EquipItem) {
     setReforgeMsg(null)
     setEnhanceMsg(null)
-    setPeekItem(item)
+    setPeekId(item.id)
   }
 
   /**
    * 洗练一条额外词条。不做二次确认：消耗已经明示在按钮旁边，而且这是要反复点的动作。
-   * peekItem 是 state 里的同一个对象引用，引擎就地改写了它的 extra[idx]，
-   * 所以这里只需更新提示文案，浮层里的词条会跟着重渲染成新值。
+   *
+   * ⚠️ `await`：远程模式下这是打到服务端的动作（§4.6），回执要一个来回才有。
+   *    本地模式返回的是普通值，`await` 一个非 Promise 照常成立 —— 两种模式同一份代码。
    */
-  function doReforge(idx: number) {
+  async function doReforge(idx: number) {
     if (!peekItem) return
-    const r = game.reforgeEquip(peekItem.id, idx)
+    const r = await game.reforgeEquip(peekItem.id, idx)
     if (!r.ok || !r.affix) { setReforgeMsg({ text: r.why ?? '洗练失败', bad: true }); return }
     setReforgeMsg({ text: `洗练完成：${AFFIX_LABEL[r.affix.type]} +${r.affix.value}%`, bad: false })
   }
@@ -307,9 +318,9 @@ export default function EquipmentView() {
    * 换回上一次洗练前的词条（v1.38.2，仅最高阶武器）。**不退费**，理由见 engine.undoReforge。
    * 快照用掉即清空（引擎里做的），所以这里不用手动关掉对比条——emit 一响它就自己没了。
    */
-  function doUndoReforge() {
+  async function doUndoReforge() {
     if (!peekItem) return
-    const r = game.undoReforge(peekItem.id)
+    const r = await game.undoReforge(peekItem.id)
     if (!r.ok || !r.affix) { setReforgeMsg({ text: r.why ?? '换回失败', bad: true }); return }
     setReforgeMsg({ text: `已换回原词条：${AFFIX_LABEL[r.affix.type]} +${r.affix.value}%`, bad: false })
   }
@@ -319,16 +330,18 @@ export default function EquipmentView() {
    * 引擎是**逐级扣费、扣到哪级算哪级**的：材料只够 3 级时返回 levels=3 且 ok=true，
    * 界面上要如实说"升了 3 级 + 为什么停下"，不能说成失败（那样玩家会以为按钮坏了）。
    */
-  function doEnhance(times: number) {
+  async function doEnhance(times: number) {
     if (!peekItem) return
-    const r = game.enhanceEquip(peekItem.id, times)
-    const now = game.enhanceInfo(peekItem)
+    const r = await game.enhanceEquip(peekItem.id, times)
+    // ⚠️ 强化等级要**在动作之后重新查**（`game.enhanceInfo` 读的是当前 state）。
+    //    远程模式下这里的 `peekItem` 已经是新对象了（每次渲染重新 find），照旧成立。
+    const now = peekItem ? game.enhanceInfo(peekItem) : { lv: 0 }
     if (!r.ok) { setEnhanceMsg({ text: r.why ?? '强化失败', bad: true }); return }
     setEnhanceMsg({ text: `强化成功 +${now.lv}${r.why ? `（${r.why}）` : ''}`, bad: false })
   }
 
-  function doAutoEquip() {
-    const r = game.autoEquipBest()
+  async function doAutoEquip() {
+    const r = await game.autoEquipBest()
     const shown = Math.round(r.powerGain)
     setToast({ text: r.changed
       ? `已为 ${teamIds.length} 名上阵武魂自动换上四件套（调整 ${r.changed} 件，${shown >= 1 ? `战力 +${fmtNum(shown)}` : '显示战力持平'}）`
@@ -336,8 +349,8 @@ export default function EquipmentView() {
   }
 
   /** 单件分解（背包卡片上的按钮）。强化过的会一并退还材料，要让玩家看到退了什么 */
-  function doBreakdown(item: EquipItem) {
-    const r = game.breakdownEquip(item.id)
+  async function doBreakdown(item: EquipItem) {
+    const r = await game.breakdownEquip(item.id)
     if (!r) { setToast({ text: '分解失败（这件装备品阶无法识别，已保留）', bad: true }); return }
     const back = r.refundCrystal ? ` · 退还斗气结晶 ×${fmtNum(r.refundCrystal)} / 武魂精血 ×${fmtNum(r.refundEssence)}` : ''
     setToast({ text: `分解 1 件，获得武魂精血 ×${r.essence}${r.xuanjing ? ` · 玄晶 ×${r.xuanjing}` : ''}${back}`, bad: false })
@@ -355,8 +368,8 @@ export default function EquipmentView() {
     setJunkPreview({ count, essence, xuanjing })
   }
 
-  function confirmJunk() {
-    const r = game.breakdownJunk()
+  async function confirmJunk() {
+    const r = await game.breakdownJunk()
     setJunkPreview(null)
     const back = r.refundCrystal ? ` · 退还斗气结晶 ×${fmtNum(r.refundCrystal)} / 武魂精血 ×${fmtNum(r.refundEssence)}` : ''
     setToast({ text: `分解 ${r.count} 件，获得武魂精血 ×${r.essence}${r.xuanjing ? ` · 玄晶 ×${r.xuanjing}` : ''}${back}`, bad: false })
@@ -376,7 +389,11 @@ export default function EquipmentView() {
                 <button key={id} onClick={() => setSelectedChar(id)}
                   className={`overflow-hidden rounded border text-center text-[10px] ${active ? 'border-dq-gold' : 'border-dq-border'}`}>
                   <div className="aspect-square">{p && <img src={p} alt={d.name} className="h-full w-full object-cover" />}</div>
-                  <div className="truncate px-0.5" style={{ color: rarityInfo(d.rarity).color }}>{d.name.slice(0, 4)}</div>
+                  {/* 名字：原来 `slice(0, 4)` 硬截（同 RosterView）——这里本来就有 `truncate`，
+                    交给格子宽度决定截到第几个字。手机端 5 列每格 ≈ 65px 偏挤，
+                    但这一栏是**换人**用的短列表（只有上阵的那几个），不像图鉴那样铺满一屏，
+                    暂时不动列数。 */}
+                  <div className="truncate px-0.5" style={{ color: rarityInfo(d.rarity).color }}>{d.name}</div>
                 </button>
               )
             })}
@@ -397,10 +414,12 @@ export default function EquipmentView() {
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm text-dq-gold">已穿戴</div>
             <div className="flex flex-wrap gap-2">
+              {/* 这两个是装备页的主操作（一键穿戴 / 一键分解）。实测手机端只有 27px 高，
+                是全页最该按得准的两个键 —— 它们点的都是"批量改动"，按错一次很难撤销 */}
               <button onClick={doAutoEquip}
-                className="rounded bg-dq-gold px-2.5 py-1 text-[11px] text-black">一键最优穿戴</button>
+                className="dq-tap-lg inline-flex items-center justify-center rounded bg-dq-gold px-2.5 py-1 text-[11px] text-black">一键最优穿戴</button>
               <button onClick={previewJunk}
-                className="rounded border border-dq-border px-2.5 py-1 text-[11px] text-[#e8dcc8] hover:border-dq-fire">一键分解垃圾</button>
+                className="dq-tap-lg inline-flex items-center justify-center rounded border border-dq-border px-2.5 py-1 text-[11px] text-[#e8dcc8] hover:border-dq-fire">一键分解垃圾</button>
             </div>
           </div>
           <DetailMsgLine msg={toast} className="mb-2" />
@@ -482,13 +501,13 @@ export default function EquipmentView() {
       {peekItem && (
         <ItemDetailModal item={peekItem}
           compare={isInBag(peekItem) ? game.powerIfEquipped(selectedChar, peekItem) - basePower : null}
-          onBreakdown={isInBag(peekItem) ? () => { doBreakdown(peekItem); setPeekItem(null) } : undefined}
+          onBreakdown={isInBag(peekItem) ? () => { void doBreakdown(peekItem); setPeekId(null) } : undefined}
           onReforge={doReforge}
           onUndoReforge={doUndoReforge}
           onEnhance={doEnhance}
           reforgeMsg={reforgeMsg}
           enhanceMsg={enhanceMsg}
-          onClose={() => { setPeekItem(null); setReforgeMsg(null); setEnhanceMsg(null) }} />
+          onClose={() => { setPeekId(null); setReforgeMsg(null); setEnhanceMsg(null) }} />
       )}
 
       {junkPreview && (

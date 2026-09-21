@@ -215,9 +215,15 @@ export default function RosterView({ focusId, onFocusConsumed }: {
                   {inTeam.has(id) && (
                     <span className="absolute right-0 top-0 rounded-bl bg-dq-gold px-1 text-[9px] leading-tight text-black">阵</span>
                   )}
+                  {/* 角色名。⚠️ 原来是 `text-[9px]` + `slice(0, 4)`，用户 2026-09-21 的原话是
+                      「特别是角色名字太小了」—— 手机上这行只有指甲盖宽，而且**硬截 4 个字**，
+                      「云岚宗杂役」这种 5 字名第 5 个字直接没了（不是省略号，是被切掉）。
+                      9px 已由 index.css 的手机端字号阶梯统一抬到 12px；
+                      这里把硬截换成 `truncate`：放得下几个显示几个，放不下给省略号，
+                      比"永远只显示前 4 个字"诚实。 */}
                   <span className="absolute inset-x-0 bottom-0 truncate bg-black/60 px-0.5 text-[9px] leading-tight"
                     style={{ color: rarity.color }}>
-                    {cdef.name.slice(0, 4)}
+                    {cdef.name}
                   </span>
                 </button>
               )
@@ -399,9 +405,12 @@ function BondPanel() {
             <div key={b.faction.id} className="rounded border px-2 py-1"
               style={{ borderColor: b.tier ? b.faction.color : '#3a2a1a', opacity: b.tier ? 1 : 0.55 }}>
               <div className="flex items-center justify-between text-xs">
-                <span style={{ color: b.faction.color }}>{b.faction.name}</span>
+                <span style={{ color: b.faction.color }}>
+                  {b.faction.name}
+                </span>
                 <span className="text-[#a89478]">
-                  {b.count} 人{b.tier ? ` · 已激活 ${b.tier.count} 人档` : ''}
+                  {b.count} 人{b.fromWild > 0 ? `（含 ${b.fromWild} 名凡人）` : ''}
+                  {b.tier ? ` · 已激活 ${b.tier.count} 人档` : ''}
                 </span>
               </div>
               <div className="text-[11px] text-[#e8dcc8]">
@@ -414,6 +423,15 @@ function BondPanel() {
           )
         })}
       </div>
+      {/* 癞子生效时把"补给了谁"说出口。玩家上阵凡人后看到的是一份凭空变大的档位，
+          不解释就等于让他以为界面算错了（而这个机制在别处没有任何提示）。 */}
+      {bonds.wildcardHost && (
+        <div className="mt-2 text-[11px] leading-relaxed text-[#5eead4]">
+          凡人修仙：上阵的凡人正替
+          <span className="text-[#e8dcc8]">{FACTIONS[bonds.wildcardHost].name}</span>
+          补人数（补给人最多的那个阵营）。凡人自己那档按实际人数算。
+        </div>
+      )}
       {total.length > 0 && (
         <div className="mt-2 border-t border-dq-border pt-1.5 text-[11px] text-dq-fire">
           全队加成：{total.join(' · ')}
@@ -501,8 +519,14 @@ function Slot({ charId, posId, active, canDrop, over, onClick, onClear, onDragSt
           ) : (
             <span className="text-center leading-tight" style={{ color: rarityInfo(cdef.rarity).color }}>{cdef.name.slice(0, 3)}</span>
           )}
+          {/* 移出阵容。⚠️ 原来是 `-right-1 -top-1 h-4 w-4` —— 而槽位那层是
+              `overflow-hidden rounded`（立绘要靠它裁圆角），这个按钮有 4px 伸到框外被**父级裁掉**：
+              实测（temp/probe-mobile-pages.cjs，320px）它同时是页面上唯一被报"文字被裁"的元素，
+              可点宽度只剩 12px 左右 —— 正是玩家说的"经常点不到"。
+              改成完整落在框内、并放大到 20px：不再被裁，手指也够得着。
+              代价是压住立绘右上角一小块，比"点不掉这个人"划算。 */}
           <button onClick={e => { e.stopPropagation(); onClear() }}
-            className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-black text-[10px] text-white">×</button>
+            className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-[11px] leading-none text-white after:absolute after:-inset-2 after:content-['']">×</button>
         </>
       ) : <span className={canDrop ? 'text-dq-gold' : 'text-[#5a4a38]'}>{active ? '选择武魂' : canDrop ? '点此编入' : '空位'}</span>}
     </div>
@@ -562,6 +586,14 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
                 </span>
               )}
               <span>{rarity.label}</span>
+              {/* 推荐站位：**这条以前只有招募页有**，于是"想排个阵先去看这人该站哪"要跳到
+                  招募页翻名录 —— 排阵容的地方反而不告诉你站哪，这属于把最该在这儿的
+                  一条信息放错了页。文案与招募页逐字相同（同一件事在两页说法不一样更糟）。
+                  ⚠️ 这是**角色自带的定位**（`CharacterDef.position`），不是"当前站在哪"
+                  ——下半部分的编入阵容按钮才管当前站位。 */}
+              <span data-stat="pos" className="rounded border border-dq-border px-1.5 py-0.5 text-[10px] text-[#a89478]">
+                {cdef.position === 'front' ? '推荐前排' : '推荐后排'}
+              </span>
             </div>
             <div className="mt-0.5 text-xs text-[#5a4a38]">{cdef.desc}</div>
             {/* 打法说明：把引擎里的目标选择规则摆到明面上，玩家排阵前就知道"他会去打谁" */}
@@ -578,6 +610,13 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
             </div>
             <div className="text-xs" style={{ color: starTierOf(entry.stars).color }}>
               {starGlyphs(entry.stars)}
+            </div>
+            {/* 单人战力：**这里以前只有队伍总战力**（`combatPower`，在队伍总览条上），
+                单个武魂值多少要看就得去招募页翻名录。换人上阵时"这两个谁强"是当场要答的问题，
+                所以摆在这一列（境界/星级旁边）——与招募页详情里那个「当前战力」是同一个
+                `powerOf` 口径，取整规则也一致（`powerOf` 返回未取整值，直接渲染会出 35.1795）。 */}
+            <div className="mt-0.5 text-xs text-[#a89478]">
+              战力 <span data-stat="power" className="tabular-nums text-dq-gold"><span data-stat-value>{fmtNum(Math.round(game.powerOf(id)))}</span></span>
             </div>
           </div>
         </div>

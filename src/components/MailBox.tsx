@@ -14,11 +14,16 @@ import { agoText } from '../game/leaderboardApi'
 const POLL_MS = 180000
 
 /**
- * 站内邮箱（v1.33）：入口是**右边缘那个信封标签**，点开从右侧滑出抽屉。
+ * 站内邮箱（v1.33 建、v1.45 挪位）：入口在**顶部那一排按钮的右上角**（tab 行最右端），
+ * 点开从右侧滑出抽屉。
  *
- * 为什么挂在这里而不是做成一个 tab：tab 行是"游戏内容"，邮箱是**运营触点** ——
- * 玩家不该为了看一封公告先记住它排在第几个页签。挂在右侧常驻，任何时候都能一眼看到
- * 有没有未读（角标），点开就是内容，不占用任何一页的版面。
+ * 为什么不做成一个 tab：tab 行是"游戏内容"，邮箱是**运营触点** —— 玩家不该为了看一封公告
+ * 先记住它排在第几个页签。但它也不该像 v1.33 那样贴在屏幕右边缘：那是一块只为一个入口
+ * 常驻的浮层，会压住页面内容。现在它占的是**本来就空着的那一排**的最右端，
+ * 未读角标在它自己的右上角，一眼可见，且不占任何一页的版面。
+ *
+ * ⚠️ `data-mail-entry` / `data-mail-badge` 的位置断言是老锚点（`verify-mail.cjs` 里
+ *    "入口在 tab 行最右端"那两条）—— 改布局要连着改它们，**不要**把它们放宽成恒真。
  *
  * 邮件列表由服务端给（全服 + 发给本人的定向，见 mail.ts），**领取状态在本地**
  * （state.gifts 的 `mail:` 键）—— 与存档的客户端权威模型一致，也不给存档加字段。
@@ -62,16 +67,18 @@ export default function MailBox() {
 
   return (
     <>
-      {/* 右边缘的信封标签。未读时角标在右上角，一眼可见 */}
+      {/* 顶部那一排按钮的右上角（tab 行最右端）。未读角标贴它自己的右上角 */}
       <button onClick={() => { setOpen(true); void refresh() }} data-mail-entry
         data-mail-unread={unclaimed.length}
         title="邮箱"
-        className="fixed right-0 top-1/2 z-30 flex -translate-y-1/2 flex-col items-center gap-0.5 rounded-l-lg border border-r-0 border-dq-border bg-dq-panel/95 px-1.5 py-2.5 text-dq-gold shadow-lg hover:bg-dq-panel">
-        <MailIcon size={18} className="leading-none" />
-        <span className="text-[10px] leading-none">邮箱</span>
+        className="relative flex shrink-0 items-center gap-1 rounded pl-2.5 pr-5 text-xs text-dq-gold transition-colors hover:bg-black/25 sm:pl-3 sm:text-sm">
+        <MailIcon size={14} className="leading-none" />
+        <span className="leading-none">邮箱</span>
         {unclaimed.length > 0 && (
+          /* ⚠️ 角标与文字**不许叠**：按钮右侧常留 pr-5（20px）那一条给角标（无未读时也留着，
+             免得未读数从 0 变 1 时整排按钮抖一下）。角标贴的是按钮自己的右上角，16px 宽 < 20px。 */
           <span data-mail-badge
-            className="absolute -left-1 -top-1 min-w-[16px] rounded-full bg-dq-fire px-1 text-[10px] font-bold leading-4 text-black">
+            className="absolute right-0.5 top-0.5 min-w-[16px] rounded-full bg-dq-fire px-1 text-[10px] font-bold leading-4 text-black">
             {unclaimed.length > 99 ? '99+' : unclaimed.length}
           </span>
         )}

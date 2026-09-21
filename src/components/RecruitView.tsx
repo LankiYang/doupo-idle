@@ -304,8 +304,13 @@ export default function RecruitView() {
   // 图鉴（`...` 复制一份再排，CHARACTERS 是 import 的常量数组，原地 sort 会污染所有用它的地方）
   const catalog = [...CHARACTERS].sort(byRarityDesc)
 
-  const pull = (times: 1 | 10) => {
-    const r = game.recruit(times)
+  /**
+   * ⚠️ `await`：远程模式下抽卡是**服务端**执行的（SPEC §4.6），结果要一个来回才有。
+   *    本地模式返回的是普通数组，`await` 一个非 Promise 照常成立 —— 两种模式同一份代码。
+   *    这也是"抽到什么不再是客户端说了算"的落点：下面这个 `r` 直接来自服务端的 `result`。
+   */
+  const pull = async (times: 1 | 10) => {
+    const r = await game.recruit(times)
     if (r.length === 0) return
     setRound(k => k + 1)   // 换 key ⇒ 结果卡重新挂载 ⇒ 入场动画每次都重放
     setResults(r)
@@ -341,9 +346,9 @@ export default function RecruitView() {
   const nbTenPull = nbRecruit && Math.floor(state.inventory.yuanfen ?? 0) >= 10
   const nbOnePull = nbRecruit && !nbTenPull
 
-  function doRedeem() {
+  async function doRedeem() {
     if (!pick) return
-    const r = game.redeemShard(pick.id)
+    const r = await game.redeemShard(pick.id)
     setToast(r.ok ? `✨ 碎片凝聚成形，获得「${pick.name}」` : ` ${r.why ?? '兑换失败'}`)
     setPick(null)
   }
@@ -398,7 +403,7 @@ export default function RecruitView() {
               <span className="text-dq-gold">本次招募结果</span>
               <span className="text-[#a89478]">点击卡片查看详情</span>
             </div>
-            <div className="grid grid-cols-5 gap-2">
+            <div className="grid grid-cols-4 gap-2 md:grid-cols-5">
               {results.map((r, i) => {
                 const cdef = charLabel(r.id)!
                 const rarity = rarityInfo(r.rarity)
@@ -425,7 +430,8 @@ export default function RecruitView() {
                           </span>}
                       {r.pity && <span className="absolute left-0 top-0 rounded-br bg-dq-gold px-1 text-[9px] text-black">保底</span>}
                     </div>
-                    <div className="truncate px-0.5" style={{ color: rarity.color }}>{cdef.name.slice(0, 4)}</div>
+                    {/* 名字：原来 `slice(0, 4)` 硬截（同 RosterView），已有 `truncate` */ }
+                    <div className="truncate px-0.5" style={{ color: rarity.color }}>{cdef.name}</div>
                     <div className="pb-1 text-[#a89478]">
                       {r.isNew ? rarity.label : r.shard > 0 ? '重复·转碎片' : '重复·返精血'}
                     </div>
@@ -452,7 +458,7 @@ export default function RecruitView() {
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-5 gap-2 sm:grid-cols-6">
+            <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 md:grid-cols-6">
               {unowned.map(c => {
                 const rarity = rarityInfo(c.rarity)
                 const cost = shardCostOf(c)
@@ -469,7 +475,8 @@ export default function RecruitView() {
                         <span className="absolute right-0 top-0 rounded-bl bg-[#5eead4] px-1 text-[9px] text-black">联动</span>
                       )}
                     </div>
-                    <div className="truncate px-0.5" style={{ color: rarity.color }}>{c.name.slice(0, 4)}</div>
+                    {/* 名字：原来 `slice(0, 4)` 硬截（同 RosterView），已有 `truncate` */ }
+                    <div className="truncate px-0.5" style={{ color: rarity.color }}>{c.name}</div>
                     <div className={`pb-0.5 text-[9px] ${afford ? 'text-dq-fire' : 'text-[#5a4a38]'}`}>✨×{cost}</div>
                   </button>
                 )
@@ -487,7 +494,14 @@ export default function RecruitView() {
           <span className="text-dq-gold">武魂名录（{Object.keys(state.roster).length} / {CHARACTERS.length} 已收录）</span>
           <span className="text-[11px] text-[#a89478]">点击查看详情</span>
         </div>
-        <div className="grid grid-cols-5 gap-2 sm:grid-cols-6">
+        {/* ⚠️ 手机端 4 列（原 5 列）、桌面仍是 6 列 —— 用户 2026-09-21 的原话是
+            「可以把 ui 放大，一排少放点」。手机端字号整体抬上去之后，5 列每格只有
+            (390−32−32)/5 ≈ 65px，12.5px 的角色名**露不全**（「萧炎（斗破）」只到「萧炎（斗」），
+            放大字号的收益被挤没了。4 列每格 ≈ 82px，六字名能整整齐齐放下。
+            改的是**列数**不是字号：字号一列一列地缩回去，就白抬了。
+            `sm:` 那档顺移一位（原来 ≥640px 直接跳 6 列，现在先走 5 列）——
+            640–767px 是手机横屏与折叠机展开态，跟手机同档更合理。 */}
+        <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 md:grid-cols-6">
           {catalog.map(c => {
             const owned = !!state.roster[c.id]
             const rarity = rarityInfo(c.rarity)
@@ -502,7 +516,8 @@ export default function RecruitView() {
                     <span className="absolute right-0 top-0 rounded-bl bg-[#5eead4] px-1 text-[9px] text-black">联动</span>
                   )}
                 </div>
-                <div className="truncate px-0.5" style={{ color: owned ? rarity.color : '#a89478' }}>{c.name.slice(0, 4)}</div>
+                {/* 名字：原来是 `slice(0, 4)`，与 RosterView 一样是**硬截**不是省略号 */}
+                <div className="truncate px-0.5" style={{ color: owned ? rarity.color : '#a89478' }}>{c.name}</div>
               </button>
             )
           })}

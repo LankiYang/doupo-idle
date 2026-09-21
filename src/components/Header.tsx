@@ -15,12 +15,18 @@ export default function Header() {
       <div className="flex shrink-0 items-center gap-2">
         <div className="dq-title text-base font-medium sm:text-lg">焚炎异录</div>
         <button onClick={() => setMutedState(toggleMuted())}
-          className="rounded border border-dq-border px-1.5 py-1 text-[#a89478] transition-colors hover:border-dq-gold hover:text-dq-gold"
+          className="dq-tap inline-flex items-center justify-center rounded border border-dq-border px-1.5 py-1 text-[#a89478] transition-colors hover:border-dq-gold hover:text-dq-gold"
           title={muted ? '取消静音' : '静音'}>
           {muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
         </button>
       </div>
-      <div className="flex min-w-0 flex-1 gap-2.5 overflow-x-auto text-xs sm:flex-wrap sm:gap-4 sm:text-sm">
+      {/* 资源条。
+          ⚠️ 手机端**换成换行**，不是横滑。实测（temp/probe-mobile-pages.cjs）：
+          320px 的屏上这一条原本是 `overflow-x-auto`，"武魂精血"被推到屏外 30px、
+          "玄晶"被推到屏外 68px —— 而横滑这件事**屏幕上没有任何提示**，
+          玩家看到的就是"少了一种资源"。7 个资源在小屏上折成两行，谁都看得见。
+          ≥640px 恢复成不换行的横排（桌面本来放得下，换行反而把顶栏撑高）。 */}
+      <div className="flex min-w-0 flex-1 flex-wrap gap-x-2.5 gap-y-0.5 text-xs sm:gap-4 sm:text-sm">
         {SHOW.map(id => {
           const info = itemLabel(id)
           const n = state.inventory[id] ?? 0

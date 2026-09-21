@@ -76,8 +76,19 @@ export interface SwapResult {
   steps: MatchStep[]
   /** 连锁拍数：第一拍 = 1，掉下来又凑成三连 = 2 …… */
   combo: number
-  /** 总共消掉多少格（伤害就是按它算的） */
+  /** 总共消掉多少格（**真实格数**，界面报账与活动计数用它） */
   tiles: number
+  /**
+   * **等效格数** = Σ(每拍格数 × 连击倍率)。取过整，可能大于 `tiles`（连击加成）。
+   *
+   * 为什么单独一个数、而不是把伤害直接塞进来：伤害 = 这个 × `MATCH_DAMAGE_PER_TILE`，
+   * 于是伤害**永远是每格伤害的整数倍** —— 服务端 `floor(damage / 每格伤害)` 反推出的
+   * 就是"他付得起多少格"，标尺两边自洽（老锚点 verify-match3-e2e 也按这条断言）。
+   * 把倍率直接乘进 damage 会让它变成一个除不尽的数，两边都对不上账。
+   */
+  damageTiles: number
+  /** 这次交换造成多少伤害（= `damageTiles` × 每格伤害）。**换算只在这里发生**，界面不许自己乘 */
+  damage: number
   /** 计分 = Σ(每拍格数 × 拍数)。只用于界面显示，伤害不直接用它 */
   score: number
 }
@@ -273,10 +284,10 @@ function expandBlasts(sp: Specials, seeds: number[]): Set<number> {
 
 /** 从某格出发把整条连锁结算干净。返回每一步的中间盘面，供界面逐帧播 */
 function resolveEx(from: Board, fromSp: Specials, forced: number[] | null, a: number, c: number, rng: Rng)
-  : { board: Board; specials: Specials; steps: MatchStep[]; combo: number; tiles: number; score: number; created: { at: number; kind: number; combo: number }[] } {
+  : { board: Board; specials: Specials; steps: MatchStep[]; combo: number; tiles: number; damageTiles: number; damage: number; score: number; created: { at: number; kind: number; combo: number }[] } {
   const steps: MatchStep[] = []
   const created: { at: number; kind: number; combo: number }[] = []
-  let cur = from, sp = fromSp, combo = 0, tiles = 0, score = 0
+  let cur = from, sp = fromSp, combo = 0, tiles = 0, damageTiles = 0, score = 0
   let seeds = forced
   // 上限只是防御性的：正常盘面连锁不会超过十几拍，无限循环说明规则写错了
   while (combo < 50) {
@@ -301,12 +312,29 @@ function resolveEx(from: Board, fromSp: Specials, forced: number[] | null, a: nu
     }
     const cleared = [...hit]
     tiles += cleared.length
+    // ★ 连击加成（v1.48）：第 `combo` 拍消掉的每格，按 `comboMultiplier(combo)` 加权。
+    //   紧挨着 `score` 写是**刻意的** —— 两者形状本来就是同一种（越往后的连锁越值钱），
+    //   放一起口径才会齐；改其中一个时记得看另一个。
+    //   第一拍 `comboMultiplier(1) = 1` ⇒ 手感基线与本改动之前逐字节相同。
+    //
+    //   ⚠️ `Math.ceil` 那一层**不是凑数，是手感的关键**：`cleared.length × 倍率` 多数时候
+    //   只带零点几的小数（第 2 拍常是 3 格 × 1.15 = 3.45），先累加、最后统一四舍五入的话
+    //   这笔小数会被抹掉 ⇒ 实测 **多数连锁伤害与改动前一字不差**（见 `verify-m3-combo` 的
+    //   ④ 段负对照，那个比例随 STEP 变，别把某一版的数抄进这里当成常数）——
+    //   玩家看到"2 连击"大字弹出、伤害却纹丝不动，正是用户说的"连击没有收益"。
+    //   逐拍向上取整后，"只要连锁 ≥ 2，这一笔就一定比不连锁多"（实测 100%）。
+    //   代价是整体膨胀从 ×1.048 升到 ×1.21（三种打法口径实测 1.164~1.226）——
+    //   服务端"开局额度"那 29% 的余量就是留给它的。
+    damageTiles += Math.ceil(cleared.length * comboMultiplier(combo))
     score += cleared.length * combo
     const nx = collapseTracked(cur, nsp, cleared, rng)
     cur = nx.board; sp = nx.specials
     steps.push({ cleared, after: cur, specialsAfter: sp, src: nx.src })
   }
-  return { board: cur, specials: sp, steps, combo, tiles, score, created }
+  // 逐拍已经向上取整过，这里**必定是整数**；`Math.round` 只作防御（防止将来有人改回浮点累加，
+  // 那样伤害就不再是每格伤害的整数倍，服务端反推格数会跟着错）。
+  const dt = Math.round(damageTiles)
+  return { board: cur, specials: sp, steps, combo, tiles, damageTiles: dt, damage: dt * MATCH_DAMAGE_PER_TILE, score, created }
 }
 
 /** 这次交换能不能消掉东西（不能就是无效交换，界面要弹回去） */
@@ -443,16 +471,83 @@ export function stepIds(ids: Ids, src: number[], nextId: number): { ids: Ids; ne
 }
 
 /**
- * 把一次交换得到的格数换算成伤害。
+ * ★ 连击加成（v1.48）：第 n 拍每格的伤害倍率 = `1 + STEP × (n-1)`，封顶 `MAX`。
  *
- * 现在取 30000。这个数和服务端血条是**同一把标尺**的两端：
+ * 用户原话：「世界boss连击的伤害要增加，连击越高伤害越高，你来计算下，不然连击没有收益」。
+ * 改之前 `res.combo` **一个字节都没进过伤害** —— 而界面既弹「N 连击」浮字、
+ * 战斗记录也写「· N 连击」（`WorldBossView.tsx`），等于对着玩家承诺了一件没兑现的事。
+ *
+ * ⚠️ 这两个数不是拍的，是 `temp/calib-match3-combo.cjs`（20 万次交换）实测定的：
+ *   · 连击一点都不罕见：**≥2 连击 53.7%**、≥3 28.0%、≥5 7.0%，平均 2.08 拍
+ *     ⇒ 加成有超过一半的交换触发得到，不是给少数人看的彩蛋。
+ *   · 逐拍格数**越深越多**（第 1 拍 3.3 格，第 2 拍起 4.1~4.9 格）—— 深连锁本来就消得多，
+ *     再乘倍率是**双重加成**，所以 STEP 不能取大。
+ *   · 取 15%/拍：全服平均伤害 ×1.21（含下面的逐拍向上取整），三个口径都实测过。
+ *     ⚠️ 这是**第二次**调：初版 8%/封顶 2.0（用户看过之后的原话是「再高一点」）。
+ *     两版的差别不在平均值（+14.7% → +20.7%），而在**深连锁**——
+ *     10 连击从 ×1.72 提到 ×2.35、封顶从 ×2.00 提到 ×2.50，
+ *     平均值的提升被"一半以上的交换根本不连锁"稀释掉了，玩家感知到的是长连锁那几笔。
+ *
+ * ⚠️ **加成必须"每一笔连锁都看得见"** —— 这是本特性最容易做砸的地方：
+ *    倍率算出来多数带零点几的小数（第 2 拍常是 3 格 × 1.15 = 3.45），如果**先累加、最后统一
+ *    四舍五入**，这点小数会被整笔抹掉 ⇒ 实测**200000 笔里有 44.0% 两种算法结果不同**
+ *    （`verify-match3-combo.cjs` ② 段直出）；不连锁的笔两种算法必然相同，
+ *    所以**差异全部落在连锁笔上**。被抹掉的那些笔里，玩家看到"2 连击"大字弹出、
+ *    飘字伤害却纹丝不动 —— 正是用户说的"连击没有收益"。
+ *    所以 `resolveEx` 里是**逐拍向上取整**（见那边的注释），实测 100% 的连锁有增益。
+ *    改这里之前先读那段：`Math.ceil` 不是可有可无的修饰。
+ *
+ * ⚠️ **改了这里要同时看三处**：
+ *   ① 服务端 `api/server.js` 的 `WB_DAMAGE_BURST_TILES` —— 它**不是**单笔受理上限，
+ *      而是**开局额度**（第一次见到某玩家时令牌桶填多少）；受理段真正夹的是桶本身。
+ *      但它必须 ≥ 单笔可能的最大等效格数，否则新人/新期的**第一笔**会被自己截掉：
+ *      实测最大 144 → **309** ⇒ 该常量 150 → 400（见那边的长注释，别再把语义写错）；
+ *   ② 服务端用 `floor(damage ÷ 每格伤害)` 反推格数、当活动计数的上界 ⇒
+ *      同样的格数现在产出更多伤害，那道上界**自然变松约 15%**（有意为之，见那边的注释：
+ *      按平均值收紧会误伤"运气差、这一笔没连击"的真实笔）；
+ *   ③ 它只进**客户端产物**（服务端不算连击）⇒ 改完必须重建产物再跑老锚点回归；
+ *      而体验服与正式服是**两份各自构建**的产物 ⇒ 正式服要等正式服那份重新部署才生效。
+ *
+ * ⚠️ 与连线讨伐（`linklink.ts` 的 `LINK_COMBO_STEP`）**刻意不同值**：那边的连击是手速攒的
+ *     （4 秒窗口、可控、能连到十几对），这边是三消的连锁（掉落凑出来的，平均只有 2 拍、
+ *     还带运气成分）。同一个百分比在两边手感完全不同，别为了"统一"把两个数改成一样。
+ */
+export const MATCH_COMBO_STEP = 0.15
+export const MATCH_COMBO_MAX = 2.5
+
+/** 第 n 拍（从 1 起）每格的伤害倍率。与 `linklink.ts` 的同名函数**同形不同参** */
+export function comboMultiplier(n: number): number {
+  const k = Math.max(1, Math.floor(n) || 1)
+  return Math.min(MATCH_COMBO_MAX, 1 + MATCH_COMBO_STEP * (k - 1))
+}
+
+/**
+ * ★ **每格伤害 —— 全项目的伤害标尺**（2026-09-20 由 3 万翻倍到 6 万）。
+ *
+ * 用户口径：「连连看和消消乐基础伤害都翻倍」「3 格 18 万」。
+ * 取 6 万（而不是别的"抬一点"的数）是因为它要同时满足两件事：三消一笔 3 格正好 18 万
+ * （用户给的算式）；而连连看的每对伤害是按这个标尺推出来的（见 `linklink.ts` 的公式），
+ * 两边同比例翻 ⇒ 两只 Boss 的产出比**逐字节不变**，玩家看不出哪只变划算了。
+ *
+ * ⚠️ **它同时是血条那把标尺的另一端**（这条换算是本常量最早的存在理由，别丢）：
  *    血量 = 人数 × 分钟 × 每分钟交换次数 × 每次交换平均格数 × 每格伤害
- * ️ 血条本身现在是**用户直接定的 2 亿**（2026-09-17「改boss数值 改到2亿」），
- *    不再由这条式子算出；但改这个数**仍然等于改标尺**，会连带改变"这个血量能打多久"的换算 ——
- *    要改就跟服务端的 WB_BOSS_HP 一起改，别只动一边。
- *
+ * 血条本身现在是**用户直接定的 2 亿**（2026-09-17「改boss数值 改到2亿」），不再由这条式子算出；
+ * 但改这个数**仍然等于改标尺**，会连带改变"这个血量能打多久"的换算 —— 2026-09-20 这轮翻倍
+ * 就把它从"一个人硬刷 26 分钟"变成了 **13 分钟**。血条本轮**没动**（那是产出节奏，由用户定夺）。
  * ⚠️ v1.40 加了特殊块之后，"每次交换平均格数"这一项**变大了**（炸弹一行就是 6 格）。
  *    标尺的四个数里改了任何一个，另外三个都要重新对一遍 —— 别只盯着这个常数看。
  *    实测值与结论见 temp/calib-match3-special.cjs 的输出（也记在 SPEC 里）。
+ *
+ * ⚠️ **改这一个数 = 全项目要同时改四处**（本项目反复踩的"两份实现必然漂"）：
+ *   · 服务端 `server.js` 的 `WB_DAMAGE_PER_TILE`（`floor(伤害 ÷ 每格)` 反推格数当上界）；
+ *   · 服务端 `LINK_DAMAGE_PER_PAIR`（连连看那把标尺，反推"消了几对"用）；
+ *   · 服务端 `WB_MAX_DAMAGE_RATE` 与 `WB_DAMAGE_BANK_MAX` —— 这两个是**点数**单位，
+ *     按点数写死 ⇒ 标尺翻倍而它们不动，等于把"以格数计"的限速与桶容量**腰斩一半**，
+ *     误伤真人的余量从 5.1 倍掉到 2.6 倍。同比例翻倍才是"防护行为逐字节不变"。
+ *   · `WB_DAMAGE_BURST_TILES` **不用动** —— 它的单位是**格数**，不是点数。
+ *
+ * ⚠️ 这是**客户端常量**：伤害在客户端算好再上报，服务端只按令牌桶做上界校验
+ *    （见 `design/防作弊开发规范.md`）⇒ 改完必须**重建产物**；体验服与正式服是
+ *    两份各自构建的产物，各改各的，别以为改一处两边都变。
  */
-export const MATCH_DAMAGE_PER_TILE = 30000
+export const MATCH_DAMAGE_PER_TILE = 60000

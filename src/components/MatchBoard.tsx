@@ -1,10 +1,23 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  MATCH_W, MATCH_DAMAGE_PER_TILE, newMatch, newSpecials, trySwapEx, hasMoveEx, isAdjacent, stepIds,
+  MATCH_W, MATCH_H, comboMultiplier, newMatch, newSpecials, trySwapEx, hasMoveEx, isAdjacent, stepIds,
   SP_NONE, SP_COL, SP_BOMB,
   type Board, type Specials, type Ids, type SwapResultEx,
 } from '../game/match3'
 import * as sfx from '../game/sfx'
+/**
+ * 连击倍率的**显示**格式：最多两位小数、去掉尾随的 0（`1.15 → "1.15"`、`2.5 → "2.5"`）。
+ *
+ * ⚠️ 别退回 `toFixed(1)` —— 它会把 **1.15 印成 "1.1"**（1.15 的浮点表示略小于 1.15，
+ *    toFixed 直接截），界面于是常年少报 0.05；而上一版 STEP=0.08 时同样是错的，
+ *    只是方向反过来（1.08 → "1.1"，**多**报 0.02）。两版都错，只是错法不同。
+ *    这是 `verify-combo-e2e.cjs` ⑦ 段拿**页面上的字**和源码常量对拍抓出来的 ——
+ *    引擎那条（26/26）验的是数字，验不到"印出来长什么样"。
+ *
+ * `Math.round(v * 100) / 100` 那一层是必需的：`1 + 0.15 × 2` 算出来是 `1.3000000000000003`，
+ * 直接 `String()` 会把那串尾巴原样印给玩家看。
+ */
+const fmtRate = (v: number) => String(Math.round(v * 100) / 100)
 // 四张元素贴图 + 一块灵阵石盘底纹，都是生图模型出的（gen-image.cjs --batch batch-gems.json，
 // 白底用 remove-bg.cjs 抠掉后转 webp）。**不是 CSS 色块** —— 用户对上一版「火木水土」四个
 // 汉字方块的原话是"很丑"。
@@ -15,8 +28,9 @@ import gemEarth from '../assets/sprites/gems/elem_earth.webp'
 import boardPlate from '../assets/sprites/gems/board_plate.webp'
 
 /**
- * 集结讨伐的消消乐盘面。**不看阵容也不看战力** —— 消掉几格就是几格的伤害，
- * 与队伍强度完全无关（伤害系数见 match3.ts 的 MATCH_DAMAGE_PER_TILE）。
+ * 集结讨伐的消消乐盘面。**不看阵容也不看战力** —— 伤害只看你消得怎么样，
+ * 与队伍强度完全无关：每格一个固定伤害，**连锁里越深的拍越值钱**
+ * （倍率见 match3.ts 的 MATCH_COMBO_STEP / MATCH_COMBO_MAX，换算见 MATCH_DAMAGE_PER_TILE）。
  *
  * 交互取「点一下选中、再点相邻格交换」而不是拖拽：拖拽在移动端要处理 touchstart/
  * touchmove/touchend 与页面滚动打架，回到原点判定、误触判定一堆边界；点选两步是零歧义的，
@@ -113,26 +127,41 @@ const Tile = memo(function Tile({ at, x, y, v, sp, selected, popping, disabled, 
   onPick: (i: number) => void
 }) {
   const g = GEMS[v] ?? GEMS[0]
-  // 位置 = 格序 × (格宽 + 间隙)，两个数都来自 CSS 变量（.dq-m3-grid 里按断点给 36 / 40）
+  // 位置 = 格序 × (格宽 + 间隙)，两个数都来自 CSS 变量（.dq-m3-grid 里按容器宽算）
   const step = 'calc(var(--cs) + var(--gap))'
+  /**
+   * ⚠️ 点击盒 = **一整格间距（cs + gap）**，不是 cs。这是 v1.47「经常点不到正确的区块」
+   * 的根治，两个原因叠在一起：
+   *   ① 旧版按钮只有 cs 宽，格间那 4px 是**死区** —— 点在缝上什么都不发生；
+   *   ② 旧版宝石画的是 `scale-[1.12]`，视觉上比按钮大 12%，于是**宝石边缘那一圈
+   *      其实属于邻居的按钮** —— 手指按在看到的宝石上，选中的却是旁边那块。
+   * 现在：按钮 = 整格间距（相邻两块严丝合缝、无死区），宝石缩在 gap/2 的内衬里，
+   * 视觉尺寸回到 cs（= 旧版 40×1.12 ≈ 44.8 → 新版 cs 上限 44，看着一样大）。
+   * **不变式：点击盒 ≥ 视觉盒**，任何一格上"看到哪块就点到哪块"。
+   */
+  const pitch = 'calc(var(--cs) + var(--gap))'
   return (
     <button type="button" onClick={() => onPick(at)} disabled={disabled}
       data-m3-cell={at} data-m3-v={v} data-m3-sp={sp}
       // 选中时的放大也走同一个 transform：**不能**用 Tailwind 的 `scale-110`，
       // 那个类会自己写一条 transform 覆盖掉位移，格子会瞬间跳回左上角。
-      style={{ width: 'var(--cs)', height: 'var(--cs)', transform: `translate3d(calc(${x} * ${step}), calc(${y} * ${step}), 0) scale(${selected ? 1.12 : 1})` }}
-      className={`dq-m3-tile rounded-md bg-black/35 p-[1px] ${selected ? 'ring-2 ring-dq-gold' : ''} ${disabled ? 'opacity-40' : ''}`}>
-      {/* 这一层只负责"块自己"的动画（掉落入场 / 消除炸开），与外面那层的格子坐标各走各的 */}
-      <div className={`dq-m3-in relative h-full w-full ${popping ? 'dq-m3-pop' : ''}`}>
-        {/* 宝石本身带透明通道（抠过白底），所以这里不需要圆角遮罩；
-            drop-shadow 给它一点"浮在盘面上"的立体感 */}
-        <img src={g.img} alt={g.ch} draggable={false}
-          className="h-full w-full scale-[1.12] object-contain drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]" />
-        {sp !== SP_NONE && (
-          <div className="dq-m3-mark dq-m3-mark-pulse">
-            <SpecialMark kind={sp} />
-          </div>
-        )}
+      style={{ width: pitch, height: pitch, transform: `translate3d(calc(${x} * ${step}), calc(${y} * ${step}), 0) scale(${selected ? 1.12 : 1})` }}
+      className="dq-m3-tile">
+      {/* 这一层只负责"块自己"的动画（掉落入场 / 消除炸开），与外面那层的格子坐标各走各的。
+          内衬 gap/2 把视觉盒收回到 cs —— 点击盒留在外面的整格间距上。 */}
+      <div className={`dq-m3-in relative h-full w-full ${popping ? 'dq-m3-pop' : ''}`}
+        style={{ padding: 'calc(var(--gap) / 2)' }}>
+        <div className={`relative h-full w-full rounded-md bg-black/35 p-[1px] ${selected ? 'ring-2 ring-dq-gold' : ''} ${disabled ? 'opacity-40' : ''}`}>
+          {/* 宝石本身带透明通道（抠过白底），所以这里不需要圆角遮罩；
+              drop-shadow 给它一点"浮在盘面上"的立体感 */}
+          <img src={g.img} alt={g.ch} draggable={false}
+            className="h-full w-full object-contain drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]" />
+          {sp !== SP_NONE && (
+            <div className="dq-m3-mark dq-m3-mark-pulse">
+              <SpecialMark kind={sp} />
+            </div>
+          )}
+        </div>
       </div>
     </button>
   )
@@ -236,7 +265,10 @@ function MatchBoardInner({ disabled, onClear, initial, fmtDamage }: {
       before = st.specialsAfter
       await sleep(FALL_MS)
     }
-    const dmg = res.tiles * MATCH_DAMAGE_PER_TILE
+    // 伤害**包含连击加成**，且换算只在引擎里做一次（`res.damage = 等效格数 × 每格伤害`）。
+    // 界面自己拿 `res.tiles` 去乘每格伤害 = 把连击加成丢掉（中文乘号写在这里是给静态锚点留活路：
+    // 写成半角 `*` 的话，这一行注释会被"裸扫文件文本"的脚本当成真的在算伤害）。
+    const dmg = res.damage
     // 连击从头喊到尾都喊就没意思了：**两拍起**才报，报一次（连锁收尾时）
     if (res.combo >= 2) {
       const key = ++comboKey.current
@@ -278,6 +310,57 @@ function MatchBoardInner({ disabled, onClear, initial, fmtDamage }: {
     void play(res, cur, i)
   }, [play, setSelBoth, flashHint])
 
+  /**
+   * ── 滑动换块（v1.47 手机端）──────────────────────────────────────────────
+   * 玩家原话：「增加滑动式交互，你懂的消消乐是可以上下左右滑动的」。
+   *
+   * 与点选**共存**，不是替代：单击仍是"选中/取消"（老锚点回归里点格子的用例全靠它，
+   * 而点选也是不少人的习惯）。所以只有**真正拖动过**（位移越过阈值）才算滑动，
+   * 并且要把随后浏览器补发的那一次 `click` 吞掉 —— 否则一次滑动会被处理两遍
+   * （先按滑动换了块，抬起手指时又按点选逻辑改了选中态）。
+   *
+   * 用 Pointer Events 而不是 Touch Events：鼠标、触摸、手写笔同一套代码，
+   * 桌面玩家用鼠标拖也一样能换（顺带把桌面也变好用了）。
+   */
+  const swipeRef = useRef<{ at: number; x: number; y: number } | null>(null)
+  /** 本次手势已被当作滑动处理 ⇒ 随之而来的 click 要忽略 */
+  const swipedRef = useRef(false)
+  /** 滑动阈值：手指抖一下不该算拖动。8px 约等于一个指尖的抖动幅度 */
+  const SWIPE_MIN = 8
+
+  const onTileDown = useCallback((e: React.PointerEvent, at: number) => {
+    swipedRef.current = false
+    swipeRef.current = { at, x: e.clientX, y: e.clientY }
+  }, [])
+
+  const onTileMove = useCallback((e: React.PointerEvent) => {
+    const s = swipeRef.current
+    if (!s || swipedRef.current) return
+    if (disabledRef.current || busyRef.current) return
+    const dx = e.clientX - s.x, dy = e.clientY - s.y
+    if (Math.hypot(dx, dy) < SWIPE_MIN) return
+    swipedRef.current = true        // 从这一刻起，这次手势属于滑动
+    swipeRef.current = null
+    const x = s.at % MATCH_W, y = Math.floor(s.at / MATCH_W)
+    // 只认**主轴**方向：斜着划一手，按位移大的那一边走。正好 45° 时按横向（>=）
+    let tx = x, ty = y
+    if (Math.abs(dx) >= Math.abs(dy)) tx = Math.min(MATCH_W - 1, Math.max(0, x + (dx > 0 ? 1 : -1)))
+    else ty = Math.min(MATCH_H - 1, Math.max(0, y + (dy > 0 ? 1 : -1)))
+    if (tx === x && ty === y) return   // 已经在边的尽头还往外划：什么都不做
+    sfx.unlock()
+    const j = ty * MATCH_W + tx
+    pick(s.at)                          // 先选中起点：与点选走**同一条**判定路径
+    pick(j)                             // 再选邻居 ⇒ 引擎自己判能不能换、换不动就提示
+  }, [pick])
+
+  const onTileUp = useCallback(() => { swipeRef.current = null }, [])
+
+  /** 点击入口：被吞掉的那一次 click 不进 pick */
+  const tap = useCallback((i: number) => {
+    if (swipedRef.current) { swipedRef.current = false; return }
+    pick(i)
+  }, [pick])
+
   // 按**身份**升序渲染：DOM 顺序恒定（新块永远追加在末尾），React 不会来回搬节点 ——
   // 搬节点会把正在跑的过渡打断，那正好就是要修的那个"没有动画"。
   const order = useMemo(() => {
@@ -289,7 +372,7 @@ function MatchBoardInner({ disabled, onClear, initial, fmtDamage }: {
   const area = { width: `calc(${MATCH_W} * var(--cs) + ${MATCH_W - 1} * var(--gap))`, height: `calc(${MATCH_W} * var(--cs) + ${MATCH_W - 1} * var(--gap))` }
 
   return (
-    <div className="flex flex-col items-center gap-1" data-m3-board={view.board.join('')} data-m3-busy={busy ? '1' : '0'}>
+    <div className="dq-m3-stage flex flex-col items-center gap-1" data-m3-board={view.board.join('')} data-m3-busy={busy ? '1' : '0'}>
       {/* 盘面**不能**自己撑开高度：里面全是绝对定位的块，尺寸由上面的 area 显式给死。
           `overflow-hidden` 是为了让"从顶上掉下来"的新块在盘面外就被裁掉。 */}
       <div className="dq-m3-grid relative overflow-hidden rounded-lg border border-dq-border/80 p-1.5 shadow-[inset_0_0_18px_rgba(0,0,0,0.9)]"
@@ -301,16 +384,28 @@ function MatchBoardInner({ disabled, onClear, initial, fmtDamage }: {
           backgroundSize: 'cover',
           backgroundPosition: 'center',
         }}>
-        <div className="relative" style={area}>
+        <div className="relative" style={area}
+          // 滑动的手势层放在**盘面这一层**（而不是每个块上）：块会被 memo 住、会重渲，
+          // 手势状态挂在上层才不会因为"这块刚被换走"而丢。
+          // `touch-action: none` 在 .dq-m3-grid 上（CSS），否则纵向划会先把页面滚起来。
+          onPointerDown={e => {
+            const el = (e.target as HTMLElement).closest('[data-m3-cell]')
+            if (el) onTileDown(e, Number(el.getAttribute('data-m3-cell')))
+          }}
+          onPointerMove={onTileMove}
+          onPointerUp={onTileUp}
+          onPointerCancel={onTileUp}>
           {order.map(t => (
             <Tile key={t.id} at={t.at} x={t.at % MATCH_W} y={Math.floor(t.at / MATCH_W)}
               v={view.board[t.at]} sp={view.specials[t.at]}
               selected={sel === t.at} popping={pop.includes(t.at)}
-              disabled={!!disabled} onPick={pick} />
+              disabled={!!disabled} onPick={tap} />
           ))}
           {/* 打击反馈都在这层：**绝对定位、不参与布局** ——
               它们一旦挤进正常流，每次连击都会把盘面顶一下，就成了另一种"抖"。 */}
-          {combo && <div key={combo.key} className="dq-m3-combo" data-m3-combo={combo.n}>{combo.n} 连击</div>}
+          {/* ⚠️ `data-m3-combo` 是锚点（probe-match3-v140.cjs 读它）⇒ **属性值必须仍是纯数字**，
+              倍率只加在文本里。 */}
+          {combo && <div key={combo.key} className="dq-m3-combo" data-m3-combo={combo.n}>{combo.n} 连击 ×{fmtRate(comboMultiplier(combo.n))}</div>}
           {floats.map(f => (
             <div key={f.id} className="dq-floating-num dq-m3-dmg" data-m3-dmg>{f.text}</div>
           ))}
@@ -318,11 +413,16 @@ function MatchBoardInner({ disabled, onClear, initial, fmtDamage }: {
       </div>
       <div className="relative flex h-4 w-full items-center justify-center">
         <span className="text-[10px] text-dq-gold sm:text-xs" data-m3-hint={hint}>{hint}</span>
+        {/* ⚠️ 这一格**不能用 `dq-tap`**：它所在的那行只有 h-4（16px），
+            而它是 `absolute + -translate-y-1/2` 居中的 —— 撑到 34px 只会让它上下各溢出 9px、
+            压在盘面最后一排上**把点击吞掉**（帮倒忙）。
+            改用 `after:` 叠一层透明的扩大区：视觉不变，手指够得着。
+            实测原尺寸 18×18（temp/probe-mobile-pages.cjs，320px）。 */}
         <button type="button" data-m3-sfx={muted ? '0' : '1'}
           title={muted ? '音效已关' : '音效已开'}
           // 关掉之后**不再解锁音频**：玩家点了关还听见"咔"的一声是最烦的
           onClick={() => { const v = !muted; sfx.setMuted(v); setMuted(v); if (!v) { sfx.unlock(); sfx.playPick() } }}
-          className={`absolute right-0 top-1/2 -translate-y-1/2 rounded p-0.5 ${muted ? 'text-[#7a6a55]' : 'text-dq-gold'}`}>
+          className={`absolute right-0 top-1/2 -translate-y-1/2 rounded p-0.5 after:absolute after:-inset-2 after:content-[''] ${muted ? 'text-[#7a6a55]' : 'text-dq-gold'}`}>
           <SoundIcon muted={muted} />
         </button>
       </div>

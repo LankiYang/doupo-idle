@@ -7,6 +7,7 @@ import {
   useWorldBossPollSeq, useWorldBossPollDelta,
   refreshWorldBoss, remainMs, fmtDuration,
   queueMatchDamage, flushQueuedDamage, rewardLabelsOf, restartWorldBoss,
+  crowdfundWorldBoss, crowdRewardLabelOf,
   type WbState, type WbNotice,
 } from '../game/worldboss'
 import MatchBoard from './MatchBoard'
@@ -184,6 +185,31 @@ export default function WorldBossView() {
   const seenNotice = useRef<number | null>(null)
   /** 重启请求在途 —— 挡住连点（一次点击就是 100 万灵金，绝不能双击扣两次） */
   const [restarting, setRestarting] = useState(false)
+  /**
+   * 众筹出资框里的数（字符串，**不要存成 number**：存 number 的话用户清空输入框
+   * 会被 `Number('')` 变成 0 再回填成 "0"，光标和输入节奏全乱）。
+   * 留空 = 按最低额度出，见 doCrowdfund。
+   */
+  const [crowdAmt, setCrowdAmt] = useState('')
+  /** 出资请求在途 —— 同样挡连点（一次点击就是真金白银） */
+  const [crowding, setCrowding] = useState(false)
+  /**
+   * 手机端：把「榜单 / 我的贡献 / 部队 / 众筹 / 重启」这一堆面板**收进底部弹窗**。
+   *
+   * 用户 2026-09-21 定的是全局口径：「手机尺寸下所有页面都要要求一屏展示，不要做整体的下滑，
+   * 想想怎么设计ui和交互满足这一点，可以横向滑动和弹窗内滑动」+「手机端不一定需要面板，
+   * 而是按钮 弹窗 跳转的逻辑」。这一页是**最塞不下**的一页：玩法栏里躺着 5 块面板，
+   * 光它们就 ~320px，而 320×568 这种机器整页留给玩法栏的不到 200px ——
+   * 盘面必然被挤到没有。
+   *
+   * ⚠️ 所以这里**不是**"把面板缩小一点"，是把它们**整体移出主屏**：
+   *    盘面独占剩下的全部高度（`--cs` 同时受容器的高约束，见 index.css），
+   *    面板改由底部栏的「详情」按钮唤出，在弹窗里滚（弹窗内滚是用户明确允许的）。
+   *
+   * ⚠️ 开关只切**类名**、不切 DOM（面板始终在文档里，只是 `display:none`）——
+   *    这页有十几个 `data-wb-*` 锚点供后台探针读，条件渲染会让它们在手机视口下**整体消失**。
+   */
+  const [panelsOpen, setPanelsOpen] = useState(false)
   // 注：战力注入与轮询**不在这里**启动 —— 那是 App 层 WorldBossWiring 的活，
   // 因为它必须在离开这一页之后继续跑（自动讨伐不能因为切页就停）。
   // 这里再注册一次的话，本组件一卸载，那份冻结的 ref 会把 App 的注册盖掉。
@@ -301,11 +327,15 @@ export default function WorldBossView() {
     ], { duration: combo > 1 ? 300 : 240, easing: 'ease-out' })
   }, [])
 
-  /** 消消乐结算完一笔：进队列，并往日志里记一条。**伤害不在这里发送** —— 见 queueMatchDamage */
+  /**
+   * 消消乐结算完一笔：进队列，并往日志里记一条。**伤害不在这里发送** —— 见 queueMatchDamage。
+   *
+   * 活动中心（v1.42）那两个计数指标：**这一处是唯一同时握着"出手了一次"和"消掉了几格"的地方**。
+   * 远程模式下它们随这笔伤害一起上报、由服务端记（见 `worldboss.ts` 的 `metricsForRemote`），
+   * 下面两行 `bumpMetric` 在那个模式下是 no-op；本地模式下它们仍是唯一的那一份。
+   */
   const onMatchClear = useCallback((res: SwapResult, damage: number) => {
-    queueMatchDamage(damage)
-    // 活动中心（v1.42）：讨伐类活动的两个计数指标。**挂点唯一**，就在这笔结算里 ——
-    // 它同时握着"出手了一次"和"消掉了几格"，而这两个数在客户端只有这一处能一起拿到。
+    queueMatchDamage(damage, res.tiles)
     game.bumpMetric('boss.hit', 1)
     game.bumpMetric('match3.tiles', res.tiles)
     hitAnim(res.combo)
@@ -331,6 +361,13 @@ export default function WorldBossView() {
   const defeated = done || !!wb?.ended
   const ended = !!wb?.ended
   const sprite = bossSpriteFor(wb?.boss.form ?? 1)
+  /**
+   * 众筹块要用的几个读数。金额**全部取自服务端下发的那一份**（`wb.crowd`），
+   * 这里只做两件本地事：算进度条宽度、把分红池念成中文（见 crowdRewardLabelOf）。
+   */
+  const crowd = wb?.crowd ?? null
+  const crowdPct = crowd && crowd.goal > 0 ? Math.min(100, (crowd.raised / crowd.goal) * 100) : 0
+  const crowdReward = crowdRewardLabelOf(crowd)
 
   /**
    * 付费重启（用户定：「每日3次结束后允许玩家花钱给整个世界boss重启一次，暂定100w重启一次」）。
@@ -339,6 +376,11 @@ export default function WorldBossView() {
    * 被拒（没打满 / 还在结算）的时候一分钱都不该出去 —— 反过来先扣后退的话，
    * 玩家会看到余额莫名闪一下。价钱也**只有服务端那一份**（`wb.restart.cost`），
    * 这里只是把它念出来。
+   *
+   * ⚠️ **扣费只有一处，取决于模式**：远程模式下这条请求带着令牌，服务端认得出是谁 ⇒
+   *    由**服务端**扣（见 `server.js` 里 `action:'restart'` 那段）；本地模式下服务端认不出
+   *    （老路径），才由这里扣。**两边都扣就是双花**（用户做这整套就是为了堵这个）。
+   *    余额也顺着下一次 `/state` 回来（≤1 秒），所以远程模式下这里什么都不用做。
    */
   const doRestart = async () => {
     if (restarting || !wb) return
@@ -351,15 +393,81 @@ export default function WorldBossView() {
     try {
       const r = await restartWorldBoss()
       if (r.restarted) {
-        if (cost > 0) game.spendCoin(cost)
+        if (cost > 0 && !game.isRemote()) game.spendCoin(cost)
         push(`已重启世界 Boss（花费 ${fmtNum(cost)} 灵金），血条回满，接着打`)
+      } else if (r.reason === 'poor') {
+        // 服务端说钱不够（它扣费失败就**不重启**，钱优先）。走到这里通常是本地余额
+        // 比服务端那份新（刚花掉还没同步），所以这不是网络错误，别去重试。
+        game.setNotice(`灵金不足（重启需要 ${fmtNum(cost)}）`)
       } else {
         game.setNotice(r.reason === 'settling' ? '上一轮还在结算奖励，稍候再试' : '今日三次尚未打满，还不能重启')
       }
     } catch {
-      game.setNotice('网络不太好，重启没成功，灵金未扣')
+      // ⚠️ 远程模式下**不能说"灵金未扣"** —— 请求可能已经送到、只是回执丢了，
+      //    钱到底动没动这里无从得知。不确定就说不确定，让玩家自己看一眼余额。
+      game.setNotice(game.isRemote() ? '网络不太好，重启结果未知，请刷新看看' : '网络不太好，重启没成功，灵金未扣')
     } finally {
       setRestarting(false)
+    }
+  }
+  /**
+   * ★ **众筹出资**（2026-09-21 用户定）：把那 100 万拆开收，凑满自动重启。
+   *
+   * 与 doRestart 的两点关键差别，都写在下面：
+   *
+   * ⚠️ **钱只能由服务端扣**（这里绝不调 `game.spendCoin`）—— 众筹**没有**本地那条老路。
+   *    服务端要按人记账、打穿后按人分红，认不出令牌就直接拒（`reason:'need_login'`）；
+   *    客户端自己扣的话，服务端那份账上根本没这个人，分红也就无从发。
+   *
+   * ⚠️ **实际扣掉的数以回执里的 `donated` 为准**：服务端会把这一笔**截到"还差多少凑满"**，
+   *    所以提示里报的必须是他，不能是我们请求的那个数（否则玩家会以为多出的那些也扣了）。
+   */
+  const doCrowdfund = async () => {
+    const crowd = wb?.crowd
+    if (crowding || !crowd) return
+    const min = Math.max(1, Math.floor(crowd.min))
+    // 留空 = 按最低额度出（输入框的 placeholder 也正是这个数）
+    const want = crowdAmt.trim() === '' ? min : Math.floor(Number(crowdAmt) || 0)
+    if (want < min) {
+      game.setNotice(`单次出资不能少于 ${fmtNum(min)} 灵金`)
+      return
+    }
+    /**
+     * 本地先看一眼余额：**服务端才是权威**（远程模式下余额以它那份为准），
+     * 但明显不够时没必要白跑一趟 —— 与 doRestart 那条前置检查同一个尺度。
+     */
+    if (Math.floor(state.inventory.coin ?? 0) < want) {
+      game.setNotice(`灵金不足（本次出资 ${fmtNum(want)}）`)
+      return
+    }
+    setCrowding(true)
+    try {
+      const r = await crowdfundWorldBoss(want)
+      if (r.crowdfunded) {
+        if (r.filled) {
+          setCrowdAmt('')
+          push(`众筹凑满！你出资 ${fmtNum(r.donated)} 灵金，血条已回满，全服接着打`)
+        } else {
+          push(`已出资 ${fmtNum(r.donated)} 灵金，众筹进度 ${fmtNum(crowd.raised + r.donated)} / ${fmtNum(crowd.goal)}`)
+        }
+      } else if (r.reason === 'poor') {
+        game.setNotice(`灵金不足（本次出资 ${fmtNum(want)}）`)
+      } else if (r.reason === 'need_login') {
+        // 与众筹的设计直接相关：钱要按人记账、分红要按人发，没有身份就没法记这笔账
+        game.setNotice('众筹需要先登录账号（出资按人记账，分红也按人发）')
+      } else if (r.reason === 'too-small') {
+        game.setNotice(`单次出资不能少于 ${fmtNum(min)} 灵金`)
+      } else if (r.reason === 'filled') {
+        game.setNotice('这一轮众筹已经凑满，血条马上重启')
+      } else {
+        game.setNotice(r.reason === 'settling' ? '上一轮还在结算奖励，稍候再试' : '今日三次尚未打满，还不能众筹重启')
+      }
+    } catch {
+      // ⚠️ 与 doRestart 同一条口径：远程模式下**不能说"没扣钱"** —— 请求可能已经送到、
+      //    只是回执丢了。不确定就说不确定，让玩家自己看一眼余额。
+      game.setNotice(game.isRemote() ? '网络不太好，出资结果未知，请刷新看看余额' : '网络不太好，出资没成功')
+    } finally {
+      setCrowding(false)
     }
   }
   const restartCost = Math.floor(Number(wb?.restart?.cost?.coin) || 0)
@@ -418,10 +526,20 @@ export default function WorldBossView() {
         </div>
       )}
 
+      {/* 弹窗遮罩。`md:hidden` 兜底：桌面端没有能打开弹窗的入口，正常不会亮 */}
+      {panelsOpen && <div className="fixed inset-0 z-30 bg-black/70 md:hidden" onClick={() => setPanelsOpen(false)} />}
+
       {/* 主区：**桌面左右分栏**（md:flex-row），窄屏上下堆叠。
           消消乐盘面是固定像素高度（6 行格子，用户定：不许缩），纵向怎么排都会把 boss 挤成一条；
-          而桌面屏幕上左右各有几百像素是空的。把玩法栏挪到右边那一栏，boss 就独占整个高度。 */}
-      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+          而桌面屏幕上左右各有几百像素是空的。把玩法栏挪到右边那一栏，boss 就独占整个高度。
+          ⚠️ 桌面还要**居中并封顶宽度**（v1.52）：不封顶的话，屏幕越宽 boss 越横着长
+          （1440px 上左栏有 900+ px），而盘面那栏是固定宽 —— 用户 2026-09-20
+          「注意在电脑端尺寸扩大消消乐和连连看的尺寸 **缩小boss的尺寸**」要的正是这个。
+          1120px 是这么定的：盘面拿到它要的宽度之后（右栏 460 + 内边距），左栏还剩 ~660px，
+          只有封顶前的一半多点 —— 而它仍然装得下立绘该有的细节。
+          ⚠️ 只挂在 md 起：手机上这一行是 `flex-col`，这两条类名没有意义（也不能生效，
+             `max-w` 会跟着 `mx-auto` 一起把窄屏的立绘缩窄）。 */}
+      <div className={`dq-wb-main flex min-h-0 flex-1 flex-col md:mx-auto md:w-full md:max-w-[1120px] md:flex-row ${panelsOpen ? '' : 'dq-wb-main-fill'}`}>
         {/* BOSS 区：**吃掉所有富余高度**（flex-1）。
             立绘是整幅插画（1024、自带背景），用 object-cover 铺满整块 —— 原先那种
             「256px 像素画 + object-contain + pixelated」撑不满这块，中间会空出一条死区。
@@ -431,7 +549,7 @@ export default function WorldBossView() {
             一条几十像素的缝。实测（390×844 / 360×640）：这一页真正能用到的只有 638 / 434px
             （外层 tab 栏就吃掉 120），扣掉顶栏与日志后，"排行榜 + 贡献面板 + 完整盘面"在小屏上
             **数学上放不下** —— 取舍是让立绘先让位，而不是让盘面被裁。 */}
-        <div className="relative min-h-[80px] flex-1 overflow-hidden bg-[#0b0710]">
+        <div className="dq-wb-boss relative min-h-[80px] flex-1 overflow-hidden bg-[#0b0710]">
           {/* 受击动画挂在这一层；呼吸动画挂里面的 img（两层各自管自己的 transform） */}
           <div ref={bossRef} className="absolute inset-0" data-wb-boss-hit>
             {sprite && (
@@ -440,7 +558,7 @@ export default function WorldBossView() {
             )}
           </div>
           {/* pr 是给右侧那个常驻邮箱标签让位：血条右端那行百分比正好在它底下 */}
-          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-2 pb-2 pt-8 pr-12 sm:px-4 sm:pr-14">
+          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-2 pb-2 pt-8 pr-12 max-md:pt-4 sm:px-4 sm:pr-14">
             <div className="mb-1 flex items-baseline justify-between text-[11px] sm:text-sm">
               <span className="font-bold text-dq-gold">{wb.boss.name}<span className="ml-1.5 text-[10px] font-normal text-[#a89478]">{wb.boss.formLabel}</span></span>
               <span className="text-[#a89478]">{wb.participants} 人合击</span>
@@ -457,16 +575,32 @@ export default function WorldBossView() {
           </div>
         </div>
 
-        {/* 玩法栏。桌面固定 372px；窄屏下**与 BOSS 区按 1:3 分剩余高度**（`flex-[3] min-h-0`）。
+        {/* 玩法栏。桌面固定 **460px**（v1.52，原 372）；窄屏下**与 BOSS 区按 1:3 分剩余高度**
+            （`flex-[3] min-h-0`）。
+            ⚠️ 460 与 `index.css` 里消消乐那档 `--cs` 上限 **56px** 是一对的：内层可用宽 = 460 −
+            左右内边距 32 − `md:pr-12` 48 = 380px，正好放得下 6×56+34 = 370px 的盘面。
+            **改一个必须改另一个** —— 列宽了但上限没抬，格子不会变大（白宽）；上限抬了但列没宽，
+            `calc` 那一支会把格子卡回去。两处的注释互相指了对方。
             ⚠️ 它原来是 `shrink-0`（内容多高就多高）+ `justify-center` —— 挤不下时内容直接
             顶出容器，而这一页的根是 `overflow-hidden`，于是**底部被裁掉**（实测：360×640 下
             重启块落到视口外 31px、桌面 1280×720 下右栏自身溢出 56px）。现在改成"挤不下就滚"。
             ⚠️ 内层那个 `my-auto` 不能改成外层的 `justify-center`：**溢出容器里的 justify-center
             会把顶部内容推到滚不到的地方**（flex 的老坑）。宽裕时靠 `my-auto` 居中，效果一样。 */}
-        <div className="flex min-h-0 flex-[3] flex-col overflow-y-auto px-2 py-1.5 sm:px-4 md:w-[372px] md:flex-none md:border-l md:border-dq-border md:pr-12">
+        <div className={`flex min-h-0 flex-col overflow-y-auto px-2 py-1.5 sm:px-4 md:w-[460px] md:flex-none md:border-l md:border-dq-border md:pr-12 ${
+          panelsOpen
+            ? 'dq-wb-play-sheet fixed inset-x-0 bottom-0 z-40 max-h-[80dvh] rounded-t-xl border-t border-dq-border bg-dq-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] md:static md:bottom-auto md:z-auto md:max-h-none md:rounded-none md:border-t-0 md:bg-transparent'
+            : 'dq-wb-play-fill'
+        }`}>
           {/* 栏内间距：手机上 4px（`gap-1`）、桌面 6px —— 手机上省下的这 12px 全部让给盘面的可见部分，
             比"少显示一行榜单"划算（榜单行数已经压到 2 行，再压就只剩标题了）。 */}
-          <div className="my-auto flex w-full flex-col gap-1 md:gap-1.5">
+          {panelsOpen && (
+            <div className="mb-2 flex shrink-0 items-center justify-between md:hidden">
+              <span className="text-sm text-dq-gold">集结讨伐 · 详情</span>
+              <button onClick={() => setPanelsOpen(false)} aria-label="关闭"
+                className="dq-tap rounded px-2 text-[#a89478] hover:text-dq-gold">✕</button>
+            </div>
+          )}
+          <div className="dq-wb-column my-auto flex w-full flex-col gap-1 md:gap-1.5">
           {/* 排行榜：用户定「底部排行榜太丑，放到消消乐上面，竖着排、有名字、有每个人的伤害百分比」 */}
           <RankList state={wb} contribPct={contribPct} />
 
@@ -498,7 +632,7 @@ export default function WorldBossView() {
             </div>
           </div>
 
-          <div className="flex flex-col items-center gap-1">
+          <div className="dq-wb-board-first flex flex-col items-center gap-1">
             <MatchBoard disabled={defeated || ended} onClear={onMatchClear} fmtDamage={fmtNum} />
             {/* 攒着还没发出去的那部分。不显示的话，玩家连消几下会以为"消了不掉血" */}
             {/* ⚠️ 这一行**必须常驻**，不可见时也得占着高度（`invisible` 而不是条件渲染）。
@@ -523,6 +657,73 @@ export default function WorldBossView() {
           </div>
 
           <MySquad state={state} />
+
+          {/* ★ **众筹重启**（2026-09-21）：把那 100 万拆开收 —— 用户的病根是「100w 很多人付不起」，
+              所以这一块排在单人重启**上面**（它才是大多数人用得上的那个入口）。
+              高度全部**写死**（理由见上面 `data-wb-queued` 那段长注释）：这一栏挤不下时宁可自己滚，
+              也绝不许把上面的 BOSS 区顶来顶去。
+              服务端不下发 `crowd` 时（对上了还没更新的旧后端）整块不渲染 —— 宁可不显示，
+              也不显示一条"目标 0、还差 0"的假进度条（那会变成一个看起来免费的按钮）。 */}
+          {!ended && crowd && (
+            <div className="flex flex-col gap-1 rounded border border-dq-border bg-black/30 px-2 py-1"
+              data-wb-crowd
+              data-wb-crowd-raised={crowd.raised}
+              data-wb-crowd-goal={crowd.goal}
+              data-wb-crowd-mine={crowd.mine}
+              data-wb-crowd-allowed={crowd.allowed ? '1' : '0'}>
+              <div className="flex items-baseline justify-between text-[10px]">
+                <span className="text-dq-gold">
+                  众筹重启
+                  {crowd.count > 0 && <span className="ml-1 text-[#a89478]">已合力重启 {crowd.count} 次</span>}
+                </span>
+                <span className="tabular-nums text-[#a89478]">
+                  {fmtNum(crowd.raised)} / {fmtNum(crowd.goal)}
+                  <span className="ml-1 text-dq-fire">{crowdPct.toFixed(1)}%</span>
+                </span>
+              </div>
+              {/* 进度条：与全服血条同一个视觉语言（窄条 + 圆角），一眼看得出"还差多少" */}
+              <div className="h-1.5 overflow-hidden rounded-full border border-dq-border bg-black/50">
+                <div className="h-full bg-gradient-to-r from-amber-600 to-dq-gold transition-[width] duration-300"
+                  style={{ width: `${crowdPct}%` }} data-wb-crowd-bar />
+              </div>
+              {/* 出资榜**横着排一行**，不另开一块竖榜：这一栏的高度是稀缺资源，
+                  而"谁出了多少"只要一眼的可见度就够了（完整榜单在服务端那边）。 */}
+              <div className="h-4 truncate text-[10px] leading-4 text-[#a89478]" data-wb-crowd-board>
+                {crowd.board.length === 0
+                  ? '还没有人出资 · 凑满即自动重启'
+                  : crowd.board.slice(0, 3).map(b => `${b.name} ${fmtNum(b.amount)}`).join(' · ')
+                    + (crowd.contributors > 3 ? ` · 共 ${crowd.contributors} 人` : '')}
+              </div>
+              {/* 出资口。**常驻**（未打满时禁用）—— 与重启按钮同一个理由：条件渲染会在打满那一刻
+                  把整块顶一下，而那正是玩家正盯着屏幕的瞬间。 */}
+              <div className="flex items-center gap-1">
+                <input
+                  type="number" inputMode="numeric"
+                  value={crowdAmt}
+                  onChange={e => setCrowdAmt(e.target.value)}
+                  placeholder={`最低 ${fmtNum(crowd.min)}`}
+                  disabled={!crowd.allowed || crowding}
+                  data-wb-crowd-input
+                  className="h-[26px] min-w-0 flex-1 rounded border border-dq-border bg-black/40 px-1.5 text-[11px] tabular-nums text-dq-gold outline-none focus:border-dq-gold/60 disabled:text-[#6b5b47]"
+                />
+                <button
+                  onClick={() => void doCrowdfund()}
+                  disabled={crowding || !crowd.allowed}
+                  data-wb-crowd-pay
+                  className="h-[26px] shrink-0 rounded border border-dq-gold/60 bg-dq-gold/10 px-2 text-[11px] text-dq-gold transition-colors hover:bg-dq-gold/20 disabled:cursor-not-allowed disabled:border-dq-border disabled:bg-transparent disabled:text-[#6b5b47]">
+                  {crowding ? '出资中…' : '出资'}
+                </button>
+              </div>
+              <div className="h-4 max-w-full truncate text-[10px] leading-tight text-dq-qing"
+                title={crowdReward || undefined}>
+                {!crowd.allowed
+                  ? `今日已讨伐 ${kills}/${maxKills} 次，打满后可众筹重启`
+                  : crowd.mine > 0
+                    ? `我已出资 ${fmtNum(crowd.mine)} · 还差 ${fmtNum(crowd.left)} 凑满`
+                    : `还差 ${fmtNum(crowd.left)} 凑满即自动重启 · 出资者另分红材料`}
+              </div>
+            </div>
+          )}
 
           {/* 付费重启的出口。**常驻**（未打满时禁用），**不是**"打满三次才出现"：
               ① 条件渲染的一行会在打满那一刻把整条 BOSS 区顶一下 —— 就是 `data-wb-queued`
@@ -563,14 +764,49 @@ export default function WorldBossView() {
           )}
           </div>
         </div>
+
+        {/* 手机底部操作栏。**常驻**（不随弹窗开合增减），位置在 主区 的最后 ——
+            手机 主区 是 flex-col，所以它就是贴底那一行；桌面 `md:hidden` 直接不是 flex 项。
+            ⚠️ 左边那两个数是**故意不带 `data-wb-*` 锚点**的：锚点必须全页唯一
+            （`data-wb-mine-num` 已经挂在弹窗里那一份上），这里再挂一份会让
+            `querySelector` 取到"先出现的那个"，而它在手机上正是隐藏的弹窗里那份。 */}
+        <div className="flex shrink-0 items-center gap-2 border-t border-dq-border bg-dq-panel px-2 py-1 pb-[max(0.375rem,env(safe-area-inset-bottom))] md:hidden">
+          <div className="min-w-0 flex-1 leading-tight">
+            <div className="truncate text-[11px]">
+              <span className="text-[#a89478]">我的贡献 </span>
+              <span className="tabular-nums font-bold text-dq-fire">{fmtNum(me?.damage ?? 0)}</span>
+              <span className="ml-1.5 tabular-nums text-dq-gold">{contribPct.toFixed(1)}%</span>
+            </div>
+            <div className="truncate text-[10px] text-[#a89478]">
+              {crowd && !ended
+                ? `众筹 ${crowdPct.toFixed(0)}% · 还差 ${fmtNum(crowd.left)}`
+                : `本轮已讨伐 ${kills}/${maxKills} 次`}
+            </div>
+          </div>
+          <button onClick={() => setPanelsOpen(o => !o)}
+            className="dq-tap shrink-0 rounded border border-dq-gold/60 bg-dq-gold/10 px-3 py-1 text-[11px] text-dq-gold">
+            {panelsOpen ? '收起' : '榜单 · 众筹 ›'}
+          </button>
+        </div>
       </div>
 
       {/* 战斗日志 */}
-      <div className="h-[56px] shrink-0 overflow-hidden border-t border-dq-border bg-black/40 px-2 py-1 text-[10px] leading-relaxed sm:px-4 sm:text-xs">
+      {/* 战报。**手机上只留最新一行（22px）**，桌面仍是 3 行 56px ——
+          手机的主屏是给盘面的，而这一条本来就是"扫一眼最近发生了什么"的滚动条，
+          三行历史在 568px 高的屏幕上等于拿 56px 换两行没人回看的旧消息。
+          ⚠️ 只**藏**不删：三条日志仍然渲染在文档里（`data-wb-log` / `data-wb-log-amount`
+             是后台探针的锚点，注释掉会让手机视口下的读数整体消失）。
+          ⚠️ 空态在手机上换一句短的：下面那句长说明是"首次进来教你怎么玩"的，
+             22px 的盒子里它会被拦腰切断，读起来像坏掉了。短的这句与盘面下方的
+             `data-m3-hint` 是同一件事的两种说法，手机上留着短的足够。 */}
+      <div className="h-[22px] shrink-0 overflow-hidden border-t border-dq-border bg-black/40 px-2 py-0.5 text-[10px] leading-relaxed sm:px-4 sm:text-xs md:h-[56px] md:py-1">
         {logRef.current.length === 0
-          ? <div className="text-[#6b5b47]">点一格选中、再点相邻一格交换，凑齐三个同色即消。消掉几格就是几格伤害，不看阵容也不看战力。血条全服共用，打穿一轮发一次奖、一轮最多三次。{reward.full}</div>
+          ? <>
+            <div className="text-[#6b5b47] max-md:hidden">点一格选中、再点相邻一格交换，凑齐三个同色即消。消掉几格就是几格伤害，不看阵容也不看战力。血条全服共用，打穿一轮发一次奖、一轮最多三次。{reward.full}</div>
+            <div className="truncate text-[#6b5b47] md:hidden">点选或滑动相邻两格交换，消几格就是几格伤害 · 血条全服共用</div>
+          </>
           : logRef.current.slice(0, 3).map((l, i) => (
-            <div key={l.at} data-wb-log={l.text} data-wb-log-amount={l.amount ?? ''} className={i === 0 ? 'text-dq-gold' : 'text-[#a89478]'}>{l.text}</div>
+            <div key={l.at} data-wb-log={l.text} data-wb-log-amount={l.amount ?? ''} className={i === 0 ? 'text-dq-gold' : 'text-[#a89478] max-md:hidden'}>{l.text}</div>
           ))}
       </div>
     </div>

@@ -288,9 +288,26 @@ export function realmLabel(level: number): string {
   return `${realm.name} ${sub} 段`
 }
 
-/** 段位小突破所需经验（斗气结晶） */
+/**
+ * 段位小突破所需经验（斗气结晶）。
+ *
+ * ★ 2026-09-21 用户：「提升斗气结晶消耗的增长速度」（连同装备强化一起）。
+ *   指数 1.9 → 2.1。差距全落在后期：10 级 1588→2517（1.59x）、
+ *   100 级 12.6 万→31.7 万（2.51x）、200 级 47.1 万→135.9 万（2.89x）。
+ *
+ *   ⚠️ **别再把它往下调。** 中间有一版退到 2.0（那版 `20·L²` 恒为整数、
+ *      数字好看，100 级正好 20 万），被用户当场纠正：「不是改少啊 还是保持高增速」。
+ *      这个需求要的是**高增速本身**，不是"数字好读"。同理也别往 1.95 试探。
+ *
+ * ⚠️ 这条曲线是**角色养成主线**，爆炸半径比装备强化大得多，连带三处：
+ *   1. `charInvestment` 反推历史投入 ⇒ **放生返还的结晶同步变多**（46 级 31.0 万→62.3 万）。
+ *      这是自洽的：老档反推走的是同一个函数，不需要迁移数据。
+ *   2. 结晶**产出端没动**，所以中后期会明显变慢 —— 若玩家反馈卡住，
+ *      该调的是结晶掉落（`trainChar` 的产出侧），不是把指数退回去。
+ *   3. 文档 `design/数值设计.md` §2 / §12 的公式与累计表已同步更新。
+ */
 export function xpToNext(level: number): number {
-  return Math.floor(20 * Math.pow(level, 1.9))
+  return Math.floor(20 * Math.pow(level, 2.1))
 }
 
 /** 升到 level+1 是否跨大境界边界，需要消耗丹药 */
@@ -485,6 +502,56 @@ export function isLabBoss(floor: number): boolean {
 export function labDaolingReward(floor: number): number {
   const base = Math.floor(2 + floor * 0.6)
   return isLabBoss(floor) ? base * 2 : base
+}
+
+/**
+ * 天梯塔每层的灵药掉落（2026-09-19 用户：「在高层天梯塔掉落灵药 稍微高一点 你算一下」）。
+ *
+ * **定位：灵药的第二条来源。第一条永远是药园挂机**（`herbPerSec = 0.3 + 角色数×0.05`；
+ * 2026-09-19 实测线上 25~56 人的真实存档 = **5580~11160/h**）。所以这条例子的分母是
+ * **「挂机产出/小时」**，而不是终身总量 —— 与论道令商店那档（`LAB_HERB_COST`，分母是
+ * "终身一次性货币"）**不是同一套定标方式**，别把两边的数拿来互相换算。
+ *
+ * 形状取 **随层数线性**：`floor × LAB_HERB_PER_FLOOR`。三个理由：
+ *   · 塔每趟都从第 1 层重开（`startLab()`），所以"高层更肥"天然就是对强者的奖励，
+ *     不必再写一个"第 N 层起才掉"的硬门槛；
+ *   · 第 1~2 层向下取整后自然掉 0 ⇒ 等于自带一个**软门槛**；
+ *   · 塔里另外两条常驻产出是「结晶 = 怪物血量/25」（指数）与「铜钱 = 定额 10」（常数），
+ *     中间夹一条线性刚好，"稍微高一点"的量级与它俩都不冲突。
+ *
+ * ⚠️ **刻意不做首领层加成**：结晶那条在首领层更肥，是因为它读的 `labStats().hp` 里
+ *    已经带了首领的 ×1.6；灵药若再单独乘一次，同一件事就有了两种说法。
+ *
+ * ⚠️ **这是常驻掉落、不是首通限定** —— 引擎推的 combatEvent 故意**不带 `first` 标记**，
+ *    界面才会按「获得」而不是「首通奖励」渲染（见 LabView 的战报行）。标错了，
+ *    每层都会显示"首通奖励"，可玩家并没有首通。
+ *
+ * ⚠️ 灵药**不是丹药的唯一成本**：`pillCraftCost` 里铜钱 = 灵药 × 1.6。塔里发的灵药要
+ *    变成丹药，玩家还得拿得出 1.6 倍的铜钱；铜钱跟不上时灵药只会堆在背包里（线上
+ *    真有一个 5270 万的存量）。**这条共闸就是数值不会失控的安全阀** —— 定标时别只
+ *    盯着灵药那一侧。
+ *
+ * ── 系数 0.2 怎么来的（2026-09-19 实测，不是手算）──────────────────────────
+ * 手算等于把引擎的回合节奏复述一遍（红线⑳），所以直接拿**线上产物**跑了 `calib-lab-herb.cjs`：
+ * 把最高层玩家（生涯 124 层、56 人阵容）的真实存档喂进去，自动爬塔 **900 秒**，
+ * 结果是 **推掉 153 层 = 612 层/h**（≈ 每小时 5 趟 1→124，两趟之间自动重开）。
+ *
+ * 关键推论：**每小时的层数几乎与实力无关**（每趟重开 ⇒ 推得慢的人只是重开得少、
+ * 每趟短），所以 `灵药/h ≈ 612/N × Σ(floor(k·f), f=1..N)`，**随生涯层数 N 线性增长**。
+ * 这正是"高层更肥"想要的方向 —— 强者拿得多，弱者也不会颗粒无收。
+ *
+ * 取 k=0.2 时（每层：[10 层]=2、[50 层]=10、[89 层]=17、[124 层]=24 灵药）：
+ *   生涯 124 层 ≈ **7,400 灵药/h**（他自己挂机 11,160/h 的 66%）
+ *   生涯  89 层 ≈ **5,260 灵药/h**（42 人挂机 8,640/h 的 61%）
+ *   生涯  30 层 ≈ **1,650 灵药/h**（30 人挂机 6,480/h 的 25%）
+ * 即"爬塔大约能把灵药收入再抬六成到七成"，但换不来同比例的丹药（铜钱那道闸见上）。
+ * ⚠️ k 是**唯一**的调节旋钮：改它就同时改了所有层的值，别再加第二条曲线。
+ */
+export const LAB_HERB_PER_FLOOR = 0.2
+
+/** 天梯塔第 floor 层击杀的灵药掉落（常驻，每层都给；1~2 层取整后为 0） */
+export function labHerbReward(floor: number): number {
+  return Math.floor(floor * LAB_HERB_PER_FLOOR)
 }
 
 // ─ 论道令商店价目（v1.35 补齐 8 品阶）──────────────────────────────────────
@@ -919,8 +986,11 @@ export const FACTION_OF: Record<string, FactionId> = {
 /** 已上阵的某个阵营：人数与当前生效的档位（未达最低档时 tier 为 null） */
 export interface ActiveBond {
   faction: FactionDef
+  /** 计入档位的**有效人数**（含被凡人癞子补上的部分，见 `fromWild`） */
   count: number
   tier: FactionTier | null
+  /** 上面那个 count 里有多少个是凡人替它凑的（v1.47 癞子）。0 = 这个阵营没吃到补位 */
+  fromWild: number
 }
 
 export interface BondBonuses {
@@ -931,7 +1001,26 @@ export interface BondBonuses {
   crit: number
   /** 全部有上阵成员的阵营（含未激活的），供界面展示"还差几个" */
   active: ActiveBond[]
+  /** 凡人癞子这次补给了哪个阵营（没补 / 场上没凡人时为 null）。界面用它说清"+N 是凡人凑的" */
+  wildcardHost: FactionId | null
 }
+
+/**
+ * 凡人修仙（v1.47）：**癞子阵营**。
+ *
+ * 它的成员不只能凑自己那 2 人档，还能**替一个别的阵营补人数** —— 玩家原话
+ * 「有点像斗地主的癞子」。补的对象是**当前人数最多的那个非凡人阵营**，
+ * 自动选、不给玩家挑：想让凡人补谁，就把谁凑成场上人最多的那个。
+ *
+ * ⚠️ 比较"谁人最多"时**不把凡人自己算进去**。2 凡人 + 2 萧家时两者并列，
+ *    把凡人纳入比较会退化成一个没有答案的平局。**先在同一条船上比（非凡人之间），
+ *    再补** —— 这样每个阵容都有唯一确定的解释。并列时取 `FACTIONS` 里声明在前的，
+ *    声明顺序本身就是规则。
+ *
+ * ⚠️ 这是**纯计算**：不入存档、不新增字段，所以没有任何迁移。
+ *    代价是"凡人补给了谁"每次都由当场阵容重算 —— 换阵容时它自己会变，这正是想要的。
+ */
+export const WILDCARD_FACTION: FactionId = 'fanren'
 
 /**
  * 统计一套阵容的羁绊加成。传的是**上阵角色 id 列表**（空位不算人）。
@@ -944,12 +1033,32 @@ export function bondBonusesFor(ids: (string | null)[]): BondBonuses {
     const f = FACTION_OF[id]
     if (f) count[f] = (count[f] ?? 0) + 1
   }
-  const out: BondBonuses = { atkPct: 0, defPct: 0, hpPct: 0, crit: 0, active: [] }
+
+  // 癞子：先收拢凡人的人数，再决定补给谁。全凡人 / 空阵容 ⇒ host 为 null ⇒ 谁也不补。
+  const wild = count[WILDCARD_FACTION] ?? 0
+  let host: FactionId | null = null
+  let hostN = 0
+  if (wild > 0) {
+    for (const def of Object.values(FACTIONS)) {
+      if (def.id === WILDCARD_FACTION) continue
+      const n = count[def.id] ?? 0
+      // 必须**严格大于**才换人 ⇒ 首次出现的那个被保留 ⇒ 并列时取声明在前的
+      if (n <= 0 || n <= hostN) continue
+      host = def.id
+      hostN = n
+    }
+  }
+
+  const out: BondBonuses = { atkPct: 0, defPct: 0, hpPct: 0, crit: 0, active: [], wildcardHost: host }
   for (const def of Object.values(FACTIONS)) {
-    const n = count[def.id] ?? 0
-    if (n <= 0) continue
+    const own = count[def.id] ?? 0
+    if (own <= 0) continue
+    // 凡人自己按**实际人数**算档（补位是它给别人的能力，不给自家加人）；
+    // 它补的那个阵营按「实际 + 凡人人数」算，于是可能直接跳档。
+    const fromWild = def.id === host ? wild : 0
+    const n = own + fromWild
     const tier = [...def.tiers].reverse().find(t => n >= t.count) ?? null
-    out.active.push({ faction: def, count: n, tier })
+    out.active.push({ faction: def, count: n, tier, fromWild })
     if (!tier) continue
     out.atkPct += tier.atk ?? 0
     out.defPct += tier.def ?? 0
@@ -1110,7 +1219,11 @@ export const LINK_CHAR_IDS = ['hanli', 'yinyue']
 /** 联动兑换价：**固定 100 枚**（不随品阶走），用户点名的数字。 */
 export const LINK_SHARD_COST = 100
 /** 活动起始时刻（毫秒时间戳）。**部署上线时写入**；`<= 0` 视为"未开活动"。 */
-export const LINK_START_MS = Date.UTC(2026, 8, 17, 17, 0) // 2026-09-18 01:00 (UTC+8)
+// 2026-09-20 02:00 (UTC+8) —— **联名返场**：首期（09-18 01:00 ~ 09-19 01:00）结束后，
+// 韩立立绘与联名海报重画了一版（首期那句 "unremarkable ordinary looks" 是照原著
+// "平平无奇"写的，玩家反馈不好看），并把活动**原样再开 24 小时**让没赶上的玩家补上。
+// 结束时刻 = 2026-09-21 02:00 (UTC+8)，公告里写的就是这个绝对时刻。
+export const LINK_START_MS = Date.UTC(2026, 8, 19, 18, 0) // 2026-09-20 02:00 (UTC+8)
 /** 活动时长：24 小时 */
 export const LINK_DURATION_MS = 24 * 3600 * 1000
 
@@ -1454,7 +1567,11 @@ export const EQUIP_BREAKDOWN: Record<Rarity, { essence: number; xuanjing: number
  *    低阶装备不是"不能强化"，而是**强到底也比不过一件白板高阶**（黄满 ×1.2 的 statMult 仍是 0.96，
  *    玄白板就是 1.0），这样"低级装备该分解"的判断不会被强化搅乱。
  *
- * 3) 价目按品阶分档、**每级单价随等级线性上涨**（第 n 级 = 基价 × n，n 从 1 起）。
+ * 3) 价目按品阶分档、**每级单价随等级加速上涨**（第 n 级 = 基价 × n^1.5，n 从 1 起）。
+ *    2026-09-21 用户「提升斗气结晶消耗的增长速度」之前是**线性**的 `基价 × n`；
+ *    改动理由、实测放大倍数、以及精血为什么没跟着动，都写在 `enhCrystalAt` 的注释里。
+ *    ⚠️ 中途曾退到 1.3 又被用户打回：「不是改少啊 还是保持高增速」——
+ *    这条需求要的是高增速本身，别再往 1.3 折中。
  *    为什么强化敢涨价、而洗练必须固定价：洗练是**无限次**的重复动作，价格会涨的话
  *    "再洗几次"就永远算不出预算（见 EQUIP_REFORGE 的注释）；强化是**有上限**的有限进度，
  *    UI 直接把"下一级要多少"摆在按钮旁，涨价反而是"越到后面越贵"的自然表达。
@@ -1463,19 +1580,30 @@ export const EQUIP_BREAKDOWN: Record<Rarity, { essence: number; xuanjing: number
  *    顶层玩家（125 关）结晶持有 1500 万~6500 万、武魂精血持有 4500~12000，
  *    而精血终身只被升星吃掉 1350~2700 —— 这两样正是**大量闲置、几乎没出口**的资源，
  *    拿它们当强化货币等于给挂机收益开了个新出口，而不去抢升星要的玄晶。
- *    满强化总价（Σ 基价×n = 基价 × cap(cap+1)/2）：
- *      黄 8,000 结晶 / 20 精血       玄 9.0 万 / 108       地 46.8 万 / 390
- *      天 204 万 / 1088              准圣 735 万 / 2730     圣 2400 万 / 6000
+ *    满强化总价（结晶 = Σ 基价×n^1.5，**逐级取整再累加**；精血 = 基价 × cap(cap+1)/2）：
+ *      黄 1.36 万 / 20 精血      玄 21.0 万 / 108      地 132 万 / 390
+ *      天 663 万 / 1088          准圣 2663 万 / 2730    圣 9505 万 / 6000
+ *    ⚠️ 结晶这六个数是 2026-09-21「提升增长速度」**之后**的值。改动前是线性的
+ *       （黄 0.8 万 / 玄 9.0 万 / 地 46.8 万 / 天 204 万 / 准圣 735 万 / 圣 2400 万），
+ *       放大倍数从 1.70x（黄）一路到 3.96x（圣）—— **品阶越高被抬得越多**。
+ *
  *    **精血价上线当天由用户上调过一档**（用户："精血消耗再稍微加高一点点"）：基价由 1/2/3/6/10/16
  *    提到 2/3/5/8/13/20，结晶价不动。精血虽是闲置资源，但它也是升星的燃料，
  *    强化若吃得太少就等于"白送"，调高后顶层强满一件圣装要 6000 精血（约其手上的一半存量）。
- *    校准点：顶层玩家手上那 1500 万结晶够把**两件圣装**强满，或把一套天阶四件强满还剩一半；
- *    中低层（55 关，持有 3 万结晶）刚好够一件地阶强满 —— 每一档都够得着，但都要攒。
+ *
+ *    ⚠️ **校准点被这次提速打破了，需要重新定标** —— 照实记下来，免得下一个人以为它还算数。
+ *       原文是「顶层 1500 万够两件圣装、或一套天阶四件还剩一半；中低层 3 万刚好一件地阶」。
+ *       核对（按改动**前**的线性价）：天阶四件 816 万 ✓ 对得上；但"两件圣装"要 4800 万 ✗、
+ *       "3 万够一件地阶"要 46.8 万 ✗ —— 这两条在提速**之前**就已失准，是更早一版数值留下的。
+ *       提速后差距进一步拉开：1500 万连**一件圣装的六分之一**都不够（需 9505 万），
+ *       只剩 2.26 件天阶（凑不齐四件），地阶涨到 132 万。
+ *       ⚠️ 要恢复"每一档都够得着、但都要攒"的手感，**该改 `EQUIP_ENHANCE` 各档基价** ——
+ *       退指数等于取消这次需求，用户已明确否掉（「不是改少啊 还是保持高增速」）。
  */
 export interface EquipEnhanceDef {
   /** 强化等级上限（0 ~ cap） */
   cap: number
-  /** 第 1 级的斗气结晶价；第 n 级 = 此值 × n */
+  /** 第 1 级的斗气结晶价；**第 n 级 = 此值 × n^1.5**（加速上涨，见 enhCrystalAt） */
   crystal: number
   /** 第 1 级的武魂精血价；第 n 级 = 此值 × n */
   essence: number
@@ -1509,21 +1637,46 @@ export function equipEnhMult(lv: number | undefined): number {
   return 1 + EQUIP_ENH_PER_LV * n
 }
 
+/**
+ * 强化第 k 级（k 从 1 起）的**斗气结晶**价。
+ *
+ * ★ 2026-09-21 用户：「提升斗气结晶消耗的增长速度」。
+ *   原来每一级是 `基价 × k` —— 级差恒等于基价，是**匀速**增长（等差）。
+ *   改成 `基价 × k^1.5` 之后，级差本身随 k 变大 ⇒ 真正"越往后越贵"。
+ *   实测放大倍数：圣装满强化累计 2400 万 → 9505 万（3.96x）、天阶 3.25x、
+ *   玄阶 2.33x、黄装只 1.70x —— **改动全部落在后期**，前期几乎无感。
+ *
+ *   ⚠️ **别再把它往下调。** 中间有一版退到 1.3（圣装砍到 5449 万），
+ *      被用户当场纠正：「不是改少啊 还是保持高增速」。1.0 就等于退回线性
+ *      = 取消这次需求；1.3 这种"折中"也不要再试。
+ *
+ * ⚠️ 武魂精血那一半**没动**（用户只说了斗气结晶），仍是 `def.essence × k` 线性。
+ *    两边刻意不同步：真要动精血，改 `equipEnhCost` 里那一项即可。
+ * ⚠️ `equipEnhCost` 与 `equipEnhSpent` **必须共用这一个函数**。累计投入是"分解退还七成"
+ *    的依据，两处各算各的（哪怕数学上等价）迟早会因为取整差出一点，
+ *    表现是"退还的比显示投入的少几颗"——最难查的那类。所以累计走逐级累加，不套求和公式。
+ */
+export function enhCrystalAt(base: number, k: number): number {
+  return Math.round(base * Math.pow(k, 1.5))
+}
+
 /** 从 lv 强化到 lv+1 要花多少（已满级返回 0，调用方无需自己判断上限） */
 export function equipEnhCost(quality: Rarity, lv: number): { crystal: number; essence: number } {
   const def = EQUIP_ENHANCE[quality]
   const n = Number.isFinite(lv) ? Math.max(0, Math.floor(lv)) : 0
   if (!def || n >= def.cap) return { crystal: 0, essence: 0 }
-  return { crystal: def.crystal * (n + 1), essence: def.essence * (n + 1) }
+  return { crystal: enhCrystalAt(def.crystal, n + 1), essence: def.essence * (n + 1) }
 }
 
-/** 强化到 lv 级**累计**投入了多少（Σ 基价×i，i = 1..lv）—— 分解退还的依据 */
+/** 强化到 lv 级**累计**投入了多少（斗气结晶 Σ 逐级价，精血 Σ 基价×i）—— 分解退还的依据 */
 export function equipEnhSpent(quality: Rarity, lv: number): { crystal: number; essence: number } {
   const def = EQUIP_ENHANCE[quality]
   const n = Number.isFinite(lv) ? Math.max(0, Math.min(Math.floor(lv), equipEnhCap(quality))) : 0
   if (!def || n <= 0) return { crystal: 0, essence: 0 }
-  const k = (n * (n + 1)) / 2
-  return { crystal: def.crystal * k, essence: def.essence * k }
+  let crystal = 0
+  // 逐级累加而不是套 Σk^1.5 的闭式：每一级都被 Math.round 过，闭式会与逐级买到的总价差几颗
+  for (let i = 1; i <= n; i++) crystal += enhCrystalAt(def.crystal, i)
+  return { crystal, essence: def.essence * ((n * (n + 1)) / 2) }
 }
 
 /**

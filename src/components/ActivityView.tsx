@@ -6,7 +6,7 @@
 //     "界面藏了按钮"从来不是拦截（v1.41 的教训），判定与发放在引擎的 claimActivity 里。
 //  ② 不给活动分类排序 —— 配置里的 order 已经在解析时就排好了（见 parseActivities）。
 import { useGame, game, fmtNum, itemLabel } from '../game/engine'
-import { ACTIVITY_METRICS, type ActivityDef } from '../game/activities'
+import { ACTIVITY_METRICS, ACTIVITY_NO_SCALE, activityScaleOf, type ActivityDef } from '../game/activities'
 import { itemSprite } from '../game/icons'
 import Ico from './Ico'
 
@@ -51,6 +51,15 @@ function ActivityCard({ a }: { a: ActivityDef }) {
   const progress = game.activityProgress(a)
   const metric = a.kind === 'task' ? ACTIVITY_METRICS[a.metric] : null
   const unit = a.kind === 'online' ? '分钟' : (metric?.unit ?? '')
+  // 到手的量走引擎（= 与 claimActivity 实际发放同一份），**不要渲染 a.items** ——
+  // 开放关卡放大的活动上，"写着 2000、到账 26000"就是这么来的。
+  const gain = game.activityRewardOf(a)
+  const scale = a.scaleByStage ? activityScaleOf(state.highestStage) : 1
+  // 这张卡里"不随关卡放大"的那些（名单来自 activities.ts 的 `ACTIVITY_NO_SCALE`，**不抄第二份**）。
+  // 必须说出口：不然玩家看到卡上写着「关卡加成 ×5」、缘分丹却只给 1 颗，第一反应是"少发了"。
+  const unscaled = scale > 1
+    ? Object.keys(gain).filter(k => ACTIVITY_NO_SCALE.includes(k) && gain[k] === a.items[k])
+    : []
   // 签到类没有"进度"，画成 0/100 会因为 claimed 立刻变成满格 —— 那正是它该有的语义
   const pct = a.kind === 'checkin'
     ? (claimed ? 100 : 0)
@@ -91,14 +100,22 @@ function ActivityCard({ a }: { a: ActivityDef }) {
       <div className="mt-1.5 flex items-center justify-between gap-2">
         <span className="min-w-0 flex-1 truncate text-[#a89478]">
           {a.kind === 'checkin'
-            ? <RewardList items={a.items} />
+            ? <RewardList items={gain} />
             : <>
                 <span className="tabular-nums text-dq-gold">{fmtNum(Math.floor(progress))}</span>
                 <span className="text-[#5a4a38]"> / {fmtNum(a.target)} {unit}</span>
                 <span className="ml-1.5">
-                  <RewardList items={a.items} />
+                  <RewardList items={gain} />
                 </span>
               </>}
+          {/* 关卡加成标记：数变大了得说清为什么，否则玩家会以为是显示错了。
+              写在两个分支**外面** —— 签到卡也会放大（它是最常点的那张），
+              只在任务卡上标会出现"同一页两张卡、一张解释了另一张没解释"。 */}
+          {scale > 1 && (
+            <span className="ml-1 text-dq-fire">
+              （关卡加成 ×{scale}{unscaled.length > 0 ? `，${unscaled.map(k => itemLabel(k).name).join('/')}不参与` : ''}）
+            </span>
+          )}
         </span>
         <button onClick={() => game.claimActivity(a.id)} disabled={!claimable}
           data-act-claim={a.id}

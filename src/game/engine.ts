@@ -4,7 +4,7 @@ import {
   CHARACTERS, FIRES, PILLS, ITEM_INFO, RARITY_INFO, LAB_BLESSINGS,
   xpToNext, needsPillFor, pillGradeFor, realmLabel, realmMult,
   stageStats, isBossStage, zoneForStage, monsterForStage, stageCoinReward,
-  labStats, isLabBoss, labDaolingReward,
+  labStats, isLabBoss, labDaolingReward, labHerbReward,
   labPillCost, LAB_ESSENCE_COST, LAB_ESSENCE_AMOUNT, LAB_HERB_COST, LAB_HERB_AMOUNT,
   enemyUnitsForStage, enemyUnitsForFloor, DUTY_OF_ROLE, bondBonusesFor,
   MAX_STARS, starUpCost, starMultOf, starTierIndex, starTierOf, DUPE_SHARD,
@@ -20,11 +20,19 @@ import {
 import { playSound } from './sound'
 import { fetchRemoteRewards, type RemoteReward } from './rewards'
 import {
-  ACTIVITY_METRICS, activeActivities, activityStatus, fetchActivities, todayKey,
+  ACTIVITY_METRICS, activeActivities, activityStatus, fetchActivities, todayKey, scaledItems,
   type ActivityDef,
 } from './activities'
+// 服务端宿主用它解析 `activities/activities.json`（Node 里没有 fetch，见 SPEC §4.5.5）。
+// 从引擎入口再导出，是为了让 `dist-engine/engine.cjs` **一个产物就够服务端用** ——
+// 否则宿主得自己再写一份解析，而两份解析必然分叉（§4.1 反复吃过这个亏）。
+export { parseActivities } from './activities'
+// 同上：服务端宿主用它解析 `rewards/rewards.json`（全服福利在服务端权威下必须由服务端发）
+export { parseRewards } from './rewards'
 import { mailGiftKey, type Mail } from './mail'
-import { SAVE_KEY } from './storageKeys'
+import { SAVE_KEY, SAVE_BAK_KEY } from './storageKeys'
+import { apiFetch } from './authApi'
+import { getRemotePid, isRemoteMode } from './remoteMode'
 
 export interface RosterEntry { level: number; xp: number; stars: number; equip: Partial<Record<EquipSlot, EquipItem>> }
 
@@ -88,7 +96,13 @@ export interface BattleState {
  * 「who 永远指我方」是刻意的——FighterCard 靠 `e.who === id` 找自己该播的动画，
  * 让它同时兼作敌方标识会把每个受击分支都拆成两半。
  */
-export interface CombatEvent { type: 'dmg' | 'heal' | 'monsterDmg' | 'kill' | 'drop' | 'down'; value: number; who?: string; item?: string; time: number; source: 'main' | 'lab'; crit?: boolean; boss?: boolean; target?: string; from?: string; atkStyle?: AtkStyle }
+export interface CombatEvent { type: 'dmg' | 'heal' | 'monsterDmg' | 'kill' | 'drop' | 'down'; value: number; who?: string; item?: string; time: number; source: 'main' | 'lab'; crit?: boolean; boss?: boolean; target?: string; from?: string; atkStyle?: AtkStyle;
+  /**
+   * `drop` 专用：这一笔是不是**首通奖励**（天梯塔的论道令 / 缘分丹是，每层的灵药不是）。
+   * 界面据此把同一类事件渲染成两种说法 —— 少了它，"每层都掉灵药"会被写成"首通奖励 灵药"。
+   * 老存档 / 老客户端没有这个字段 ⇒ `undefined` ⇒ 按"非首通"渲染，纯增加、不破坏兼容。
+   */
+  first?: boolean }
 
 /** 同一回合内相邻出手事件的演出间隔（ms）——UI 只播放 time 已到的事件，形成依次出手的节奏 */
 export const SEQ_MS = 220
@@ -225,6 +239,14 @@ export interface GameState {
   pityTian: number // 距上次出天阶+的抽数（保底 PITY_TIAN）
   pityQuasi: number // 距上次出准圣+的抽数（保底 PITY_QUASI）
   pitySheng: number // 距上次出圣阶的抽数（保底 PITY_SHENG）
+  /**
+   * 终身累计抽数 / 终身累计出圣阶张数（v1.47，给「抽卡手气榜」用）。
+   * 两者与上面三个 pity 是**不同性质**的东西：pity 会归零、只反映「距上次」，
+   * 这两个只增不减 ⇒ 才能算「平均多少抽出一张圣阶」。
+   * 老存档一律没有这两个字段 ⇒ 从 0 起算（**绝不因此判死档**）。
+   */
+  pullCount: number
+  shengCount: number
   notice: string
   lastTick: number
   combatEvents: CombatEvent[]
@@ -337,6 +359,39 @@ const GIFTS: { id: string; label: string; grant: (inv: Record<string, number>) =
  */
 const REMOTE_POLL_MS = 3 * 60 * 1000
 
+// ── 远程模式（v2.0 阶段 3，SPEC §4.6）的常量 ────────────────────────────────
+/** `/state` 轮询间隔：可见 1 秒。**轮询就是心跳** —— 服务端按"90 秒内有过 /state 或 /action"判在线。 */
+const STATE_POLL_MS = 1000
+/**
+ * 页面在后台时的轮询间隔。**故意不是 1 秒**：浏览器会把后台标签页的定时器降频到分钟级，
+ * 定 1 秒也拿不到 1 秒。15 秒是"能定到的、又不至于每次都撞上降频"的数。
+ * 后台被降频到超过 90 秒也不怕 —— 服务端会把这段算成离线，重新在线时补结算挂机产出。
+ */
+const STATE_POLL_HIDDEN_MS = 15000
+/**
+ * 两次 `/action` 之间的最小间隔。服务端是 `ACTION_MIN_MS = 120`，这里留 20ms 余量。
+ *
+ * ⚠️ **客户端不"猜"服务端那个常量**（复述第二份常量 = 必然分叉，见 authApi 里
+ *    `PW_MIN_HINT` 那段）。这里只保证"不会比服务端更密、也不把它当成判据"：
+ *    真被限频了，回执是 `rate`，静默咽掉即可（那是服务端在防守，不是玩家的错）。
+ */
+const ACTION_MIN_MS = 140
+/** 本机那份副本的写入节流。全量 188KB，按 1Hz 写会把主线程卡住。 */
+const CACHE_MIN_MS = 30000
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
+/** `/action` 的回执（引擎视角，不是 HTTP 视角）。见 `postAction`。 */
+export interface ActionOutcome<T = unknown> {
+  /** 这个**动作**被服务端接受并执行了吗。限频/鉴权/网络失败都是 false。 */
+  ok: boolean
+  /** 引擎的返回值（void 类动作是 null）。 */
+  result: T | null
+  /** 给人看的失败原因。成功时没有。 */
+  why?: string
+  /** `rate` | `refused` | `need_login` | `bad_args` | `bad_op` | `error` | `network` | `offline` */
+  reason?: string
+}
+
 /** 数值兜底：缺失/非数字（存档被改坏）一律当 0，避免 NaN 顺着存档扩散 */
 function num(v: unknown): number {
   const n = Number(v)
@@ -364,6 +419,8 @@ function freshState(): GameState {
     pityTian: 0,
     pityQuasi: 0,
     pitySheng: 0,
+    pullCount: 0,
+    shengCount: 0,
     notice: '',
     lastTick: Date.now(),
     combatEvents: [],
@@ -529,8 +586,56 @@ function sanitizeReforgeUndo(raw: unknown): ReforgeUndo | null {
   }
 }
 
-class GameStore {
+/**
+ * 存档的存储介质。浏览器传 `localStorage`（默认，行为与历史逐字节一致）；
+ * 服务端传自己的实现（**每个玩家一份**，见 SPEC §4.4）。
+ *
+ * ⚠️ 刻意用**构造参数注入**而不是"切换全局 `localStorage`"：服务端要同时持有多个玩家实例，
+ * 而全局只有一个。引擎内部有异步回调（远程配置、notice 的 3 秒定时器），
+ * 一旦靠全局切换，A 玩家的写就会落进 B 玩家的档里 —— 那是比丢档更糟的串档。
+ */
+export interface SaveStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+}
+
+export interface GameOptions {
+  /** 存储介质。默认全局 `localStorage`（浏览器）。 */
+  storage?: SaveStorage
+  /**
+   * 是否自启客户端循环（100ms tick / 2 秒定时落盘 / beforeunload / 远程配置轮询）。
+   * 浏览器默认 **true**（行为不变）；**服务端必须传 false** —— 服务端按自己的 1Hz 同步驱动
+   * `tick()`，且不轮询远程配置（它直接读文件，见 SPEC §4.4.2）。
+   */
+  autoLoop?: boolean
+  /**
+   * 服务端注入的**活动配置**（SPEC §4.5.5）。浏览器**不传** —— 它靠 `syncActivities()` 自己
+   * `fetch`（配置在 `activities/` 目录，运营改文件即全服生效）；Node 里没有 `fetch`，
+   * 所以由宿主读文件、用 `parseActivities` 解析后从这里塞进来。
+   * 配置变化时宿主应调 `setRemoteActivities()` 重新注入，不能只注入一次。
+   */
+  activities?: ActivityDef[]
+  /**
+   * **远程模式**（v2.0 阶段 3，SPEC §4.6）：页面**只渲染服务端下发的状态**，玩家的每个动作
+   * 打到 `/action`，客户端**不再算账**。
+   *
+   * 为什么是这一条在防作弊：客户端权威下，"改前端内存 / 改本地存档"就是刷钱的手段。
+   * 远程模式里本机那份存档退化成**只读副本**（渲染首屏用，且**绝不回传**）——
+   * 改了它，页面下一秒就被服务端的增量打回；改前端内存同样。
+   *
+   * 开启后构造函数**只留配置轮询**，下面这些本地循环全部拆掉（每一条都是分叉源）：
+   *   100ms `tick()`（它会写 `lastTick` 与产出，与服务端 1Hz 并发）、2 秒 `save()`、
+   *   `beforeunload` 保存、`syncRemoteRewards()`（服务端已按 rewards.json 发放）、
+   *   构造函数里的 `applyOfflineProgress()`（服务端在 `acquire()` 里补结算，再补一次 = 重复发放）。
+   *   ⚠️ `syncActivities()` **保留**：它只把活动**配置**拉进内存（`activityList()` 读的就是它），
+   *      停掉活动中心的 tab 会静默空白；它不写任何权威数值。
+   */
+  remote?: boolean
+}
+
+export class GameStore {
   state: GameState
+  private storage: SaveStorage
   private listeners = new Set<() => void>()
   /**
    * 服务端下发的活动配置（v1.42）。**不存档**：它是运营侧的数据、随拉随用，
@@ -547,11 +652,61 @@ class GameStore {
    */
   private newAccount = false
 
-  constructor() {
+  // ── 远程模式的状态（SPEC §4.6）────────────────────────────────────────────
+  /** 见 `GameOptions.remote`。构造时定下，之后不再变。 */
+  private remote = false
+  /**
+   * 给 React 看的快照。与 `this.state` 只差一处：远程模式下本地提示会临时盖在 `notice` 上。
+   *
+   * ⚠️ **必须缓存成同一个引用**：`useSyncExternalStore` 每次渲染都调 `getSnapshot()` 并拿
+   *    `Object.is` 比对，返回新对象会直接报 "The result of getSnapshot should be cached"
+   *    并无限重渲染。所以只在 `emit()` 里换，别在 getter 里现造。
+   */
+  private view!: GameState
+  /** 远程模式下的**本地**提示（"灵金不足"这类）。服务端那份 `state.notice` 不被它改写。 */
+  private localNotice = ''
+  private localNoticeTimer: ReturnType<typeof setTimeout> | null = null
+  /** 服务端内容的游标（`/state` 的 `srev`）。0 = 手上没有全量，下一拍必须全量。 */
+  private srev = 0
+  /** 服务端时钟 − 本地时钟(ms)。`combatEvents[].time` 用的是**服务端**时钟。 */
+  private clockSkew = 0
+  /** `/action` 串行队列：同一时刻只允许一个在飞，且两次之间留够间隔。 */
+  private actionQueue: Promise<unknown> = Promise.resolve()
+  private lastActionAt = 0
+  /** 断线 ⇒ **只读**。绝不拿本地状态重建权威（那正是要拆掉的绕过口）。 */
+  private remoteDown = false
+  /** 服务端明确说 `need_login` ⇒ 只读，提示重新登录。**不**回退到本地算账。 */
+  private needLogin = false
+  /** 本机副本待写 + 上次写入时刻（节流用）。 */
+  private cacheDirty = false
+  private lastCacheAt = 0
+  /** 本机那份原始存档是否已经让位给 `SAVE_BAK_KEY`（只让一次，见 `writeCache`）。 */
+  private cacheStashed = false
+  /** 轮询在飞标志：可见性变化会额外触发一次，别让它和定时那一次并行。 */
+  private polling = false
+  private remoteTimer: ReturnType<typeof setTimeout> | null = null
+
+  constructor(opts: GameOptions = {}) {
+    this.storage = opts.storage ?? localStorage
+    this.remote = opts.remote === true
     this.state = this.load()
-    this.applyOfflineProgress()
+    this.view = this.state
+    // ⚠️ 远程模式下**不补离线收益**：服务端在 `acquire()`（离线转在线）里已经补过一次，
+    //    客户端再补一次就是**重复发放**（且用的是本机时钟与本机缓存里的 lastTick）。
+    if (!this.remote) this.applyOfflineProgress()
     // 发放提示走 setNotice：它带 3 秒自动清除，直接写 state.notice 会永久挂在顶栏
     if (this.justGranted.length) this.setNotice(`礼包到账：${this.justGranted.join('、')}`)
+    // 活动配置：浏览器那侧等下面的 syncActivities() 去 fetch；服务端由宿主直接注入（它没有 fetch）
+    if (opts.activities) this.remoteActivities = opts.activities
+    // 服务端在这里就返回：它自己按 1Hz 同步调 tick()，不要任何客户端循环（SPEC §4.4.2）
+    if (opts.autoLoop === false) return
+    if (this.remote) {
+      // 远程模式：**只留配置轮询**。活动配置仍然要拉（运营改文件即全服生效），
+      // 其余本地循环一律不启（见 `GameOptions.remote` 里逐条的理由）。
+      this.syncActivities()
+      setInterval(() => this.syncActivities(), REMOTE_POLL_MS)
+      return
+    }
     setInterval(() => this.tick(), 100)
     setInterval(() => this.save(), 2000)
     window.addEventListener('beforeunload', () => this.save())
@@ -566,7 +721,7 @@ class GameStore {
     // 依次尝试：主存档 → 上一份备份 → 全新存档。任何一份损坏都自动跳过，绝不因抛错丢进度。
     for (const key of [SAVE_KEY, SAVE_KEY + '.bak']) {
       try {
-        const raw = localStorage.getItem(key)
+        const raw = this.storage.getItem(key)
         if (!raw) continue
         const migrated = this.migrate(JSON.parse(raw))
         if (migrated) return migrated
@@ -662,6 +817,14 @@ class GameStore {
       ? pityClamp(parsed.pitySheng, PITY_SHENG)
       : pityClamp(legacy.pityRare, PITY_SHENG)
 
+    // 终身累计计数（手气榜）：非负整数，**外加一条结构性约束 `shengCount ≤ pullCount`**。
+    // 为什么必须有这条：圣阶数是「平均多少抽一张」的**分母**，而这张榜越低越好 ——
+    // 分母被吹大就等于直接空降第一名。抽数少于张数在任何真实玩法下都不可能发生，
+    // 所以这不是拍脑袋的上限，是玩法本身的不变量（抗伪造的通用上限留给 ④ /save 收窄那条线）。
+    const luckCount = (v: unknown) => (Number.isFinite(v as number) ? Math.max(0, Math.floor(v as number)) : 0)
+    const pullCount = luckCount(parsed.pullCount)
+    const shengCount = Math.min(luckCount(parsed.shengCount), pullCount)
+
     const out: GameState = {
       ...base,
       ...parsed,
@@ -683,6 +846,12 @@ class GameStore {
       pityTian,
       pityQuasi,
       pitySheng,
+      // 手气榜的终身累计计数（v1.47）。**刻意不做回溯播种**：老档一律从 0 起 ——
+      // 「抽到过几张圣阶」在存档里根本不存在（pitySheng 会归零、roster 会去重也会被分解/兑换增删），
+      // 估算出来的数各人偏差方向还不一致，宁可榜先稀一阵也不摆假数据。
+      // 必须放在 `...parsed` 之后：否则畸形值会盖掉这里的净化结果。
+      pullCount,
+      shengCount,
       shop: (parsed.shop && typeof parsed.shop.counts === 'object' && parsed.shop.counts)
         ? { date: parsed.shop.date, counts: parsed.shop.counts }
         : { date: todayKey(), counts: {} },
@@ -711,8 +880,13 @@ class GameStore {
   /**
    * 结算一批奖励。幂等键是 state.gifts（与内置 GIFTS 共用同一张表，随存档与云备份走）：
    * 领过的直接跳过，所以清单里留着老条目是安全的，运营不必手工清理。
+   *
+   * ⚠️ **public、且服务端必需**（SPEC §4.5.5）：Node 里没有 `fetch`，服务端宿主读
+   * `rewards/rewards.json`、用 `parseRewards` 解析后从这里塞进来。**服务端权威下这件事
+   * 必须由服务端做** —— 以前靠客户端打开页面时自己拉，现在玩家的存档是服务端在写，
+   * 客户端拉完也无处可写（写了自己那份也随即被权威态覆盖）。
    */
-  private grantRemote(list: RemoteReward[]): void {
+  grantRemote(list: RemoteReward[]): void {
     if (list.length === 0) return
     const gifts = { ...(this.state.gifts ?? {}) }
     const inventory = { ...this.state.inventory }
@@ -752,7 +926,14 @@ class GameStore {
    * 重复点、多标签页同时点、领完刷新再点，都只会到账一次：幂等键就是 gifts 里那个键。
    * 附件数值已由 mail.ts 的白名单校验过（非法的那封根本不会进到列表里）。
    */
-  claimMail(mail: Mail): boolean {
+  claimMail(mail: Mail): boolean | Promise<boolean> {
+    // ⚠️ **只把 id 送上去，附件一个字节都不传**（SPEC §4.5.5）：服务端自己从 mail.json 查那封、
+    //    顺带校验收件人确实是本人，然后按**它读到的那份附件**发货。
+    //    客户端权威时代这里送的是整个 Mail 对象（含 items），服务端权威下那就是
+    //    「客户端能凭空签发 yuanfen: 9999」的洞 —— 这正是本轮要收掉的东西之一。
+    if (this.remote) {
+      return this.postAction<boolean>('claimMail', { mailId: mail.id }).then(r => r.ok && r.result === true)
+    }
     const key = mailGiftKey(mail.id)
     if ((this.state.gifts ?? {})[key] !== undefined) return false
     const gifts = { ...(this.state.gifts ?? {}) }
@@ -781,6 +962,10 @@ class GameStore {
 
   /** 当日计数与当日在线时长跟着日期走；跨天清零。**全站日期口径只有 activities.todayKey 一处** */
   private ensureActivityDay() {
+    // ⚠️ 远程模式下**必须 no-op**：权威日界在服务端（`todayKey()` 用的是运行环境的本地日历，
+    //    服务端与浏览器的时区/时钟未必一致）。本地按浏览器日历清一次 day 表，就会与服务端
+    //    那份打架 —— 而 `syncActivities()`（远程模式下**特意保留**的那条）也会走到这里。
+    if (this.remote) return
     const a = this.state.activities
     const today = todayKey()
     if (a.date !== today) {
@@ -809,6 +994,14 @@ class GameStore {
    * 挂点上敲错一个字母，不该往存档里堆一个永远没人读、还会随云备份传下去的垃圾键。
    */
   bumpMetric(metric: string, n = 1) {
+    // ⚠️ 远程模式下**服务端计数**（§4.6）：绝大多数指标（stage.win / recruit / reforge / …）
+    //    服务端在自己的动作路径上已经记过了；客户端再记一次 = 双份。
+    //    世界 Boss 那两个（boss.hit / match3.tiles）**客户端才有**（消消乐的一笔结算只有它拿得到），
+    //    它们走 `/worldboss` 的 `clears`/`tiles` 字段上交，不从这里走（见 WorldBossView）。
+    //    ⚠️ 2026-09-18 起，服务端**不再直接采信**这两个上报值（当时前端伪造成天文数字就能一次打满
+    //    两个每日活动）：服务端改按**已验证的伤害**反推格数/出手次数，再与上报值取 min —— 上报值
+    //    现在只是「我是会带这两个字段的新客户端」的标记 + 一个宽松上界。客户端**一个字都不用改**。
+    if (this.remote) return
     if (!(metric in ACTIVITY_METRICS) || !(n > 0)) return
     this.ensureActivityDay()
     const a = this.state.activities
@@ -822,14 +1015,22 @@ class GameStore {
     return activeActivities(this.remoteActivities, now)
   }
 
+  /**
+   * 注入一份活动配置。**服务端专用**（见 SPEC §4.5.5）：浏览器走 `syncActivities()`。
+   *
+   * 比较后才赋值 + 重渲 —— 宿主会定期重读配置文件（运营改文件要即刻生效），
+   * 不比较的话每隔几十秒就来一次无意义的重渲。
+   */
+  setRemoteActivities(list: ActivityDef[]): void {
+    if (JSON.stringify(list) === JSON.stringify(this.remoteActivities)) return
+    this.remoteActivities = list
+    this.emit()
+  }
+
   /** 拉活动配置。拉不到就**沿用上一次的清单**（有旧配置总比活动中心突然空掉强），绝不影响游戏本身 */
   async syncActivities(): Promise<void> {
     try {
-      const list = await fetchActivities()
-      if (JSON.stringify(list) !== JSON.stringify(this.remoteActivities)) {
-        this.remoteActivities = list
-        this.emit()
-      }
+      this.setRemoteActivities(await fetchActivities())
     } catch { /* 拉不到就算了，等下一次轮询 */ }
   }
 
@@ -868,10 +1069,24 @@ class GameStore {
   }
 
   /**
+   * 一条活动**此刻领到手**的那份奖励 —— 界面上的奖励文字走这里，不走 `a.items`。
+   * 与 `claimActivity` 的实际发放共用 `scaledItems`，所以"看到的"和"到账的"不可能分叉。
+   * 界面若直接渲染 `a.items`，后期玩家会看到"写着 2000、实际到账 26000"。
+   */
+  activityRewardOf(a: ActivityDef): Record<string, number> {
+    return scaledItems(a, num(this.state.highestStage))
+  }
+
+  /**
    * 领取一份活动奖励。**判定与发放都在这里**，界面只管调它——
    * 重复点、多标签页同时点、领完刷新再点，都只到账一次（幂等键就是 claimed 里的那个时间戳）。
    */
-  claimActivity(id: string): { ok: boolean; why?: string } {
+  claimActivity(id: string): { ok: boolean; why?: string } | Promise<{ ok: boolean; why?: string }> {
+    // 同上：`{ok:false,why}` 会被服务端翻成 `refused`，这里翻回来
+    if (this.remote) {
+      return this.postAction<{ ok: boolean; why?: string }>('claimActivity', { id })
+        .then(r => r.ok ? (r.result ?? { ok: true }) : { ok: false, why: r.why })
+    }
     const now = Date.now()
     const a = this.remoteActivities.find(x => x.id === id)
     if (!a || !a.enabled) return { ok: false, why: '活动不存在或已下架' }
@@ -884,8 +1099,11 @@ class GameStore {
     if (!this.activityReached(a)) return { ok: false, why: '条件尚未达成' }
 
     const s = this.state.activities
+    // 到手的量走 `scaledItems`（v1.47 关卡放大）—— 与界面上写的那个数**必须**是同一份，
+    // 所以两边都调这个函数，而不是各乘一次倍数。
+    const gain = scaledItems(a, num(this.state.highestStage))
     const inventory = { ...this.state.inventory }
-    for (const k of Object.keys(a.items)) inventory[k] = num(inventory[k]) + a.items[k]
+    for (const k of Object.keys(gain)) inventory[k] = num(inventory[k]) + gain[k]
     this.state.inventory = inventory
     s.claimed = { ...s.claimed, [a.id]: now }
 
@@ -904,31 +1122,302 @@ class GameStore {
   }
 
   save() {
-    if (this.saveSuspended) return
+    // ⚠️ 远程模式下**引擎不落盘**：本机那份只是"断网时首屏能画出来"的副本，
+    //    由 `writeCache()` 节流写（§4.6）。留成 no-op 而不是删掉各调用方 ——
+    //    引擎内部十几处"到账立刻落盘"，逐个删既易漏，又会把"这条路径改了权威态"
+    //    这个信息一起删掉，以后更难看懂。
+    if (this.remote || this.saveSuspended) return
     try {
       const next = JSON.stringify(this.state)
       // 写入前先把上一份完好存档备份到 .bak：主存档万一写坏，下次启动可回退，杜绝死档
-      const prev = localStorage.getItem(SAVE_KEY)
-      if (prev && prev !== next) localStorage.setItem(SAVE_KEY + '.bak', prev)
-      localStorage.setItem(SAVE_KEY, next)
+      const prev = this.storage.getItem(SAVE_KEY)
+      if (prev && prev !== next) this.storage.setItem(SAVE_KEY + '.bak', prev)
+      this.storage.setItem(SAVE_KEY, next)
     } catch { /* ignore（如隐私模式/超额）*/ }
+  }
+
+  /**
+   * 把服务端那份状态写进本机缓存。**只作副本，绝不回传**（远程模式下不再有 `POST /save`）。
+   *
+   * 它存在的唯一理由：断网时首屏还能画出"上次看到的样子"，而不是一片空白。
+   * 节流 30 秒 + `pagehide` 各一次 —— 全量 188KB，按 1Hz 写会把主线程卡住。
+   */
+  writeCache(force = false) {
+    if (!this.remote) return
+    const now = Date.now()
+    if (!force && (!this.cacheDirty || now - this.lastCacheAt < CACHE_MIN_MS)) return
+    this.cacheDirty = false
+    this.lastCacheAt = now
+    try {
+      const next = JSON.stringify(this.state)
+      const prev = this.storage.getItem(SAVE_KEY)
+      if (prev === next) return
+      // ⚠️ **原始那份只让位一次**：第一次写副本前，把这台设备**本来的**存档挪进 .bak。
+      //    之后每次写都往 .bak 塞"上一份服务端状态"的话，30 秒后老玩家本机那份就没了 ——
+      //    而那是他升级到服务端权威之前**唯一的本机备份**。
+      if (prev && !this.cacheStashed) this.storage.setItem(SAVE_BAK_KEY, prev)
+      this.cacheStashed = true
+      this.storage.setItem(SAVE_KEY, next)
+    } catch { /* ignore（隐私模式/超额） */ }
   }
 
   subscribe = (fn: () => void) => {
     this.listeners.add(fn)
     return () => { this.listeners.delete(fn) }
   }
-  getSnapshot = () => this.state
+  getSnapshot = () => this.view
   private emit() {
     this.state = { ...this.state }
+    // 本地提示只盖在**快照**上，不写进 `state`（见 setNotice）
+    this.view = this.localNotice ? { ...this.state, notice: this.localNotice } : this.state
     this.listeners.forEach(fn => fn())
   }
 
   setNotice(text: string) {
+    if (this.remote) {
+      // ⚠️ 远程模式下 `state.notice` **归服务端所有**：服务端的引擎也会写它（"首通第 N 关！"、
+      //    "全队阵亡，撤退疗伤中…"），那些话必须到玩家眼前。所以本地提示不去写 state ——
+      //    写了会①下一秒被服务端的增量打回、或者反过来把服务端那句话吞掉，②还会被写进本机副本。
+      //    做法：本地提示临时盖在 `view` 的 notice 上 3 秒，`state` 一个字节不动。
+      this.localNotice = text
+      if (this.localNoticeTimer) clearTimeout(this.localNoticeTimer)
+      this.localNoticeTimer = setTimeout(() => {
+        this.localNoticeTimer = null
+        this.localNotice = ''
+        this.emit()
+      }, 3000)
+      this.emit()
+      return
+    }
     this.state.notice = text
     setTimeout(() => {
       if (this.state.notice === text) { this.state.notice = ''; this.emit() }
     }, 3000)
+  }
+
+  // ── 远程模式：状态同步与动作（SPEC §4.6）────────────────────────────────────
+  //
+  // 这一段的全部职责：**把服务端那份状态拿过来渲染，把玩家的动作送回去执行**。
+  // 客户端在这条链路上不产生任何数值 —— 它连一个 `+=` 都不做。
+  //
+  // 三条不变量，改这一段之前先看这三条：
+  //  ① **值直接赋值，绝不 `JSON.parse`**。服务端的 `wrapParts()` 把已经序列化好的字符串
+  //     包成 `Raw`、`json()` 原样内联进回执体，所以 `res.json()` 解出来**已经是解析好的值**
+  //     （2026-09-18 在 8790 沙盒实测：`inventory` 是 object、`stage` 是 number、
+  //     **`notice` 是 string**）。再 parse 一次会把 `notice` 这类本身就是字符串的键解析坏。
+  //  ② **合并增量只覆盖已有键，绝不新增**。`state` 与 `saves/<pid>.json` 的 data 同构是
+  //     回滚红线（老客户端读得懂同一份东西），多一个键就会随本机副本漏出去。
+  //  ③ **断线/未登录一律只读**，绝不用本地状态重建权威、绝不回退到本地执行动作 ——
+  //     那正是这一整轮要拆掉的绕过口。
+
+  /** 远程模式的两条请求共用的前缀（与 authApi/saveApi 同一处口径：带构建前缀）。 */
+  private api(path: string): string { return `${import.meta.env.BASE_URL}api${path}` }
+
+  /** 界面上要用它判断"显示重连中 / 禁用按钮"。**不要**据此做业务判断。 */
+  remoteStatus(): { remote: boolean; down: boolean; needLogin: boolean; loaded: boolean } {
+    return { remote: this.remote, down: this.remoteDown, needLogin: this.needLogin, loaded: this.srev > 0 }
+  }
+  isRemote(): boolean { return this.remote }
+  /** 时钟偏移（服务端 − 本地）。`combatEvents[].time` 是服务端时钟，界面按需换算。 */
+  skewMs(): number { return this.clockSkew }
+
+  /**
+   * 用服务端下发的**全量**状态替换本地那份（首次进入、或游标太旧服务端回了全量）。
+   * @returns 实际覆盖到的键数
+   */
+  applyRemoteFull(remote: Record<string, unknown>): number {
+    const self = this.state as unknown as Record<string, unknown>
+    let n = 0
+    for (const k of Object.keys(self)) {
+      if (k in remote) { self[k] = remote[k]; n++ }
+    }
+    this.remoteDown = false
+    this.needLogin = false
+    this.cacheDirty = true
+    this.emit()
+    this.writeCache()
+    return n
+  }
+
+  /**
+   * 合并服务端回的一批**变化的键**（`/state` 的增量与 `/action` 的 `changed` 是同一个形状）。
+   * @returns 实际合并到的键数
+   */
+  applyRemoteDelta(changed: Record<string, unknown> | null | undefined): number {
+    if (!changed) return 0
+    const self = this.state as unknown as Record<string, unknown>
+    let n = 0
+    for (const k of Object.keys(changed)) {
+      // ⚠️ 不认识键就**丢掉并留痕**（不变量②）。服务端理论上不会多发，但这是客户端这一侧
+      //    唯一的形状闸 —— 静默接收一个新键，等于把"同构"这条回滚红线交给对端去守。
+      if (!(k in self)) { console.warn('[remote] 忽略服务端发来的未知键：' + k); continue }
+      self[k] = changed[k]
+      n++
+    }
+    if (n) { this.cacheDirty = true; this.emit() }
+    return n
+  }
+
+  /**
+   * 把一个动作送到服务端执行（SPEC §4.5.3）。**远程模式下所有写操作的唯一出口。**
+   *
+   * 串行队列：同一时刻只允许一个在飞，两次之间留 `ACTION_MIN_MS`（> 服务端的 120ms）。
+   * 为什么必须串行：这些动作之间**大多不可交换**（先买后穿 vs 先穿后买结果不同），
+   * 并发发出去等于把顺序交给网络。
+   *
+   * ⚠️ **绝不自动重试**：网络失败时这个动作**可能已经在服务端执行过了**，重试就是双花
+   *    （抽卡抽两次、扣两次钱）。失败就是失败，交给玩家再点一次 —— 他会看到结果。
+   * ⚠️ 本函数**从不 reject**：调用方可以放心地 `void game.xxx()` 而不接 rejection。
+   */
+  postAction<T = unknown>(op: string, args: Record<string, unknown> = {}): Promise<ActionOutcome<T>> {
+    const offline = (reason: string, why?: string): ActionOutcome<T> =>
+      ({ ok: false, result: null, reason, why })
+
+    if (!this.remote) return Promise.resolve(offline('offline', '本地模式不走服务端动作'))
+    if (this.needLogin) return Promise.resolve(offline('need_login', '登录状态已失效，请重新登录'))
+
+    const run = async (): Promise<ActionOutcome<T>> => {
+      const wait = this.lastActionAt + ACTION_MIN_MS - Date.now()
+      if (wait > 0) await sleep(wait)
+      this.lastActionAt = Date.now()
+
+      let j: Record<string, unknown>
+      try {
+        const r = await apiFetch(this.api('/action'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op, args, playerId: getRemotePid() }),
+        })
+        j = await r.json()
+      } catch {
+        this.remoteDown = true
+        this.emit()
+        this.setNotice('连不上服务器，这次操作没有送出')
+        return offline('network', '连不上服务器')
+      }
+
+      // 回执里带 `rev`/`srev` ⇒ 服务端在应答（哪怕业务上被拒）⇒ 连接是通的
+      if (j.rev !== undefined) this.remoteDown = false
+      if (Number.isInteger(j.srev)) this.srev = j.srev as number
+      // 被拒也带 `changed`（有的 op 会改了一部分才早退，由服务端决定）。照合并，
+      // 不去猜"这次到底动没动过" —— 猜错就会把一个真实的改动当成没发生。
+      if (j.changed) this.applyRemoteDelta(j.changed as Record<string, unknown>)
+
+      if (j.ok === true) {
+        return { ok: true, result: (j.result ?? null) as T | null }
+      }
+
+      const reason = String(j.reason || 'error')
+      // 限频**静默**：那是服务端在防守，不是玩家的错，弹一句"你太快了"只会让人以为游戏坏了
+      if (reason === 'rate') return offline(reason)
+      if (reason === 'need_login') {
+        this.needLogin = true
+        this.emit()
+        this.setNotice('登录状态已失效，请重新登录')
+        return offline(reason, '需要重新登录')
+      }
+      if (reason === 'refused') {
+        // 引擎自己的业务拒绝，`why` 是它给的那句话（"缘分丹不足"），**原样显示**
+        const why = typeof j.why === 'string' ? j.why : '这个操作没能完成'
+        this.setNotice(why)
+        return offline(reason, why)
+      }
+      // `bad_op` / `bad_args` 是**客户端自己的 bug**（op 名字写错、参数形状不对）：
+      // 留一条带具体 op 的控制台记录，否则它只会表现成"点了没反应"。
+      console.error('[remote] 服务端拒绝了动作', op, reason)
+      this.setNotice('这个操作没能完成')
+      return offline(reason)
+    }
+
+    // 串到队尾。`then(run, run)`：前一个失败了也要接着跑下一个（不是 reject 链）
+    const p = this.actionQueue.then(run, run)
+    // 队列自身要吞掉结果，否则一次失败会污染后面所有 then
+    this.actionQueue = p.then(() => undefined, () => undefined)
+    return p
+  }
+
+  /**
+   * 远程模式下把动作交给服务端、**把引擎那套返回值原样翻回来**；本地模式返回 `null`
+   * 表示"你自己往下走"。每个写方法的第一行都长这样：
+   *
+   * ```ts
+   * const fwd = this.delegate<Result>('opName', { a, b })
+   * if (fwd) return fwd
+   * ```
+   *
+   * 之所以判断 `if (fwd)` 而不是 `if (this.remote)`：**只有一个地方**知道"远不远程"。
+   * 本地那条路因此一个字节都没动 —— 老锚点回归靠的就是这一点。
+   *
+   * ⚠️ 用它的前提是"服务端的 `result` 就是引擎的返回值"。**形状带 `ok/why` 的那两个
+   *    （`redeemShard`/`claimActivity`）不走这里**：服务端会把 `{ok:false,why}` 翻成
+   *    `reason:'refused'`，得自己翻译回来（见各自的方法）。
+   */
+  private delegate<T>(op: string, args: Record<string, unknown>): Promise<T> | null {
+    if (!this.remote) return null
+    return this.postAction<T>(op, args).then(r => r.result as T)
+  }
+
+  /**
+   * 拉一次服务端状态。首次（`srev === 0`）必然是全量；之后带游标取增量。
+   * 自愈：游标太旧（服务端的状态环被裁掉了）时服务端会回全量，这里照收。
+   */
+  async pollState(): Promise<void> {
+    if (!this.remote || this.polling) return
+    this.polling = true
+    const wasDown = this.remoteDown || this.needLogin
+    let applied = 0
+    try {
+      const pid = getRemotePid()
+      const r = await apiFetch(this.api(`/state?playerId=${encodeURIComponent(pid)}&since=${this.srev}`))
+      const j = await r.json().catch(() => null)
+      if (!j || j.ok !== true) {
+        // `need_login`：服务端明确说"这个身份不合法"。**绝不回退到本地算账**（不变量③）——
+        // 表现只能是"提示重登 + 只读"。老玩家（没账号的裸存档码）会被正常受理，不走这里。
+        if (j && j.reason === 'need_login') this.needLogin = true
+        else this.remoteDown = true
+        this.emit()
+        return
+      }
+      this.remoteDown = false
+      this.needLogin = false
+      if (typeof j.serverTime === 'number') this.clockSkew = j.serverTime - Date.now()
+      if (Number.isInteger(j.srev)) this.srev = j.srev as number
+      if (j.state) applied = this.applyRemoteFull(j.state as Record<string, unknown>)
+      else if (j.changed) applied = this.applyRemoteDelta(j.changed as Record<string, unknown>)
+    } catch {
+      this.remoteDown = true
+      this.emit()
+      return
+    } finally {
+      this.polling = false
+    }
+    // 状态没变、但"在线/离线"这个显示位变了 ⇒ 也得重渲一次，否则"重连中"会一直挂着
+    if (applied === 0 && wasDown) this.emit()
+  }
+
+  /**
+   * 起轮询。**这一步之后玩家才算"在线"** —— 服务端按"90 秒内有过 `/state` 或 `/action`"判，
+   * 所以轮询本身就是心跳，没有单独的心跳端点。
+   */
+  startRemoteLoop() {
+    if (!this.remote) return
+    // 只允许起**一条**链。`pollState` 自己带在飞保护，但两条链会各排各的定时器
+    // ⇒ 请求量翻倍、还都在写同一份 `srev` 游标。这个字段就是"链已经起过"的标记
+    // （不复位：这个循环本来就活到页面关掉为止）。
+    if (this.remoteTimer !== null) return
+    const tick = async () => {
+      await this.pollState()
+      const hidden = typeof document !== 'undefined' && document.hidden
+      this.remoteTimer = setTimeout(() => { void tick() }, hidden ? STATE_POLL_HIDDEN_MS : STATE_POLL_MS)
+    }
+    void tick()
+    if (typeof window === 'undefined') return
+    // 关页面/切后台时把副本落一次（节流的那 30 秒可能刚好没到）
+    window.addEventListener('pagehide', () => this.writeCache(true))
+    document.addEventListener('visibilitychange', () => {
+      // 切回前台立刻拉一次：后台期间浏览器会把定时器降频，玩家看到的可能是几十秒前的画面
+      if (!document.hidden) void this.pollState()
+    })
   }
 
   // ── 斗气结晶（挂机产出，随打坐弟子数量增长）────────────────────────────────
@@ -943,7 +1432,13 @@ class GameStore {
     return 0.3 + rosterCount * 0.05
   }
 
-  private applyOfflineProgress() {
+  /**
+   * 结算离线收益：按 `lastTick` 到现在补挂机产出的结晶/灵药（上限 8 小时），**不推进战斗**。
+   *
+   * ⚠️ **public** —— 服务端在「离线转在线」时调它（SPEC §4.4.2）。
+   * 客户端那侧由构造函数调一次（打开页面时），行为与历史一致。
+   */
+  applyOfflineProgress() {
     const nowMs = Date.now()
     const dt = Math.min((nowMs - this.state.lastTick) / 1000, 8 * 3600)
     if (dt > 1) {
@@ -954,7 +1449,12 @@ class GameStore {
     this.state.lastTick = nowMs
   }
 
-  private tick() {
+  /**
+   * ⚠️ **public** —— 服务端按 1Hz 同步驱动它（SPEC §4.4.2）。
+   * 浏览器侧由构造函数里的 100ms 循环调用，行为与历史一致；`dt` 按**真实时间差**算，
+   * 所以驱动的频率可任意放宽（1 秒一次不会漏回合，战斗回合本身是 2 秒）。
+   */
+  tick() {
     const nowMs = Date.now()
     const dt = Math.min((nowMs - this.state.lastTick) / 1000, 5)
     // 活动中心的「在线时长」用**另一个 dt**，别跟上面那个混：
@@ -1006,6 +1506,8 @@ class GameStore {
 
   // ── 经验分配（通用斗气结晶 → 指定角色）──────────────────────────────────
   trainChar(id: string, amount: number) {
+    const fwd = this.delegate<void>('trainChar', { charId: id, amount })
+    if (fwd) return fwd
     const entry = this.state.roster[id]
     const cdef = CHAR_MAP[id]
     if (!entry || !cdef) return
@@ -1055,6 +1557,8 @@ class GameStore {
 
   // ── 阵容 ───────────────────────────────────────────────────────────────
   setSlot(row: 'front' | 'back', index: number, charId: string | null) {
+    const fwd = this.delegate<void>('setSlot', { row, index, charId })
+    if (fwd) return fwd
     if (charId && !this.state.roster[charId]) return
     // 越界保护：UI 传错 index 时静默丢弃，绝不让 team 数组长出空洞
     // （空洞里的 undefined 会绕过 `!!x` 之外的判断，让 activeFighters 与实际血条对不上）
@@ -1076,6 +1580,8 @@ class GameStore {
    * 自动战斗/战斗页正好在那一帧读阵容，看到的就是残缺阵型。这里先取出两人再写回，只 emit 一次。
    */
   swapSlots(a: TeamSlotPos, b: TeamSlotPos) {
+    const fwd = this.delegate<void>('swapSlots', { a, b })
+    if (fwd) return fwd
     const ta = this.state.team[a.row], tb = this.state.team[b.row]
     if (a.index < 0 || a.index >= ta.length) return
     if (b.index < 0 || b.index >= tb.length) return
@@ -1091,7 +1597,9 @@ class GameStore {
    * 刻意**不动已经在阵上的位置** —— 这是"补位"不是"重排"：玩家精心凑的阵营羁绊如果被一键打散，
    * 那这个按钮就成了陷阱。想换人仍然得自己换。
    */
-  fillEmptySlots(): number {
+  fillEmptySlots(): number | Promise<number> {
+    const fwd = this.delegate<number>('fillEmptySlots', {})
+    if (fwd) return fwd
     const used = new Set(this.activeFighters())
     const pool = Object.keys(this.state.roster)
       .filter(id => !used.has(id) && CHAR_MAP[id])
@@ -1111,6 +1619,8 @@ class GameStore {
   }
 
   equipFire(fireId: string | null) {
+    const fwd = this.delegate<void>('equipFire', { fireId })
+    if (fwd) return fwd
     if (fireId && !this.ownsFire(fireId)) { this.setNotice('尚未获得此异火'); return }
     this.state.equippedFire = fireId
     this.emit()
@@ -1137,6 +1647,8 @@ class GameStore {
    * 传 null 返回主线最新关卡。切换会清空当前战斗，自动出战随即按新关卡重开。
    */
   setFarmStage(n: number | null) {
+    const fwd = this.delegate<void>('setFarmStage', { stage: n })
+    if (fwd) return fwd
     if (n === null) {
       this.state.farmStage = null
       this.state.lastProgressAt = Date.now() // 返回主线重置僵持计时，避免立刻误报卡关
@@ -1148,6 +1660,8 @@ class GameStore {
   }
 
   startBattle() {
+    const fwd = this.delegate<void>('startBattle', {})
+    if (fwd) return fwd
     const fighters = this.activeFighters()
     if (fighters.length === 0) { this.setNotice('请先编排阵容'); return }
     const fighterHp: Record<string, number> = {}
@@ -1160,12 +1674,16 @@ class GameStore {
   }
 
   stopBattle() {
+    const fwd = this.delegate<void>('stopBattle', {})
+    if (fwd) return fwd
     this.state.battle = null
     this.state.autoBattle = false
     this.emit()
   }
 
   toggleAutoBattle() {
+    const fwd = this.delegate<void>('toggleAutoBattle', {})
+    if (fwd) return fwd
     this.state.autoBattle = !this.state.autoBattle
     if (this.state.autoBattle && !this.state.battle) this.startBattle()
     this.emit()
@@ -1649,6 +2167,8 @@ class GameStore {
   }
 
   startLab() {
+    const fwd = this.delegate<void>('startLab', {})
+    if (fwd) return fwd
     const fighters = this.activeFighters()
     if (fighters.length === 0) { this.setNotice('请先编排阵容'); return }
     this.state.lab.blessings = []
@@ -1663,6 +2183,8 @@ class GameStore {
   }
 
   retreatLab() {
+    const fwd = this.delegate<void>('retreatLab', {})
+    if (fwd) return fwd
     this.state.lab.battle = null
     this.state.lab.autoLab = false
     this.state.lab.blessings = []
@@ -1671,6 +2193,8 @@ class GameStore {
   }
 
   toggleAutoLab() {
+    const fwd = this.delegate<void>('toggleAutoLab', {})
+    if (fwd) return fwd
     this.state.lab.autoLab = !this.state.lab.autoLab
     if (this.state.lab.autoLab && !this.state.lab.battle) this.startLab()
     this.emit()
@@ -1722,6 +2246,15 @@ class GameStore {
     const bt = this.blessingTotals()
     this.state.inventory.crystal = (this.state.inventory.crystal ?? 0) + (labStats(b.floor).hp / 25) * (1 + bt.crystalPct / 100)
     this.state.inventory.coin = (this.state.inventory.coin ?? 0) + Math.floor(10 * (1 + bt.coinPct / 100))
+    // 灵药：**常驻掉落，每层都给**（不是首通限定），量随层数线性增长 ——
+    // 定标与"为什么不做首领加成"见 data.ts 的 labHerbReward。1~2 层取整后为 0，天然是软门槛。
+    const herb = labHerbReward(b.floor)
+    if (herb > 0) {
+      this.state.inventory.herb = (this.state.inventory.herb ?? 0) + herb
+      // ⚠️ 故意**不带 `first`** —— 界面据此区分「获得」与「首通奖励」。带上它，
+      //    每一层都会显示"首通奖励 灵药"，而玩家根本没有首通。
+      this.state.combatEvents.push({ type: 'drop', value: herb, item: 'herb', time: Date.now(), source: 'lab' })
+    }
     this.tryDropEquip(boss)
 
     const isFirstClear = b.floor > this.state.lab.highestFloor
@@ -1729,11 +2262,11 @@ class GameStore {
       this.state.lab.highestFloor = b.floor
       const daoling = Math.floor(labDaolingReward(b.floor) * (1 + bt.daolingPct / 100))
       this.state.inventory.daoling = (this.state.inventory.daoling ?? 0) + daoling
-      this.state.combatEvents.push({ type: 'drop', value: daoling, item: 'daoling', time: Date.now(), source: 'lab' })
+      this.state.combatEvents.push({ type: 'drop', value: daoling, item: 'daoling', time: Date.now(), source: 'lab', first: true })
       // 每 5 层首通给 1 颗缘分丹：与主线并列的抽卡货币来源
       if (isLabBoss(b.floor)) {
         this.state.inventory.yuanfen = (this.state.inventory.yuanfen ?? 0) + 1
-        this.state.combatEvents.push({ type: 'drop', value: 1, item: 'yuanfen', time: Date.now(), source: 'lab' })
+        this.state.combatEvents.push({ type: 'drop', value: 1, item: 'yuanfen', time: Date.now(), source: 'lab', first: true })
       }
       for (const f of FIRES) {
         if (f.floorReq === b.floor && !this.ownsFire(f.id)) {
@@ -1759,6 +2292,8 @@ class GameStore {
   }
 
   chooseBlessing(id: string) {
+    const fwd = this.delegate<void>('chooseBlessing', { id })
+    if (fwd) return fwd
     if (!this.state.lab.offer?.includes(id)) return
     this.state.lab.blessings.push(id)
     this.state.lab.offer = null
@@ -1788,6 +2323,8 @@ class GameStore {
    * 论道令不足时**直接返回、不扣令也不发货**（负对照由 verify-lab-pill-shop 守着）。
    */
   buyLabShop(item: 'pill' | 'essence' | 'herb', grade?: number) {
+    const fwd = this.delegate<void>('buyLabShop', { item, grade })
+    if (fwd) return fwd
     const inv = this.state.inventory
     if (item === 'pill') {
       const pill = PILLS.find(p => p.grade === grade)
@@ -1823,11 +2360,16 @@ class GameStore {
    *
    * 为什么是这三个数：缘分丹是抽卡唯一货币，玩家终身只有 40~70 抽（推导见 data.ts 的常量注释），
    * 保底抽数大于终身抽数就等于没做——这正是原先「90 抽必出天阶+」的问题，全服无人触发过。
+   *
+   * 这里同时是**终身累计计数**（`pullCount` / `shengCount`，手气榜用）的唯一写入点。
+   * 刻意放在本函数内、而不是 `recruit()` 的循环里：这样「出了圣阶」与「圣阶保底归零」
+   * 在代码上就是同一件事，两个数不可能对不上（对不上 = 榜上的平均值自相矛盾）。
    */
   private rollRarity(): { rarity: Rarity; pity: boolean } {
     this.state.pityTian++
     this.state.pityQuasi++
     this.state.pitySheng++
+    this.state.pullCount++
 
     let rarity: Rarity
     let pity = true
@@ -1846,7 +2388,10 @@ class GameStore {
     // 抽到哪一档就重置「该档及以下」的计数：出圣阶等于三层全清，出准圣清掉准圣与天阶。
     // 注意不能反过来「出了好东西就把计数清零」——那我们等于白送，保底会泛滥。
     const order = RARITY_INFO[rarity].order
-    if (order >= RARITY_INFO.sheng.order) this.state.pitySheng = 0
+    if (order >= RARITY_INFO.sheng.order) {
+      this.state.pitySheng = 0
+      this.state.shengCount++ // 与上一行同生共死：手气榜的「出过几张圣阶」就定义在这里
+    }
     if (order >= RARITY_INFO.quasi.order) this.state.pityQuasi = 0
     if (order >= RARITY_INFO.tian.order) this.state.pityTian = 0
     return { rarity, pity }
@@ -1870,6 +2415,8 @@ class GameStore {
    * 低阶也给碎片等于让碎片随抽数线性泛滥。见 data.ts 的 DUPE_SHARD 注释。
    */
   recruit(times: 1 | 10) {
+    const fwd = this.delegate<{ id: string; isNew: boolean; rarity: Rarity; pity: boolean; shard: number; essence: number }[]>('recruit', { times })
+    if (fwd) return fwd
     const cost = times
     if ((this.state.inventory.yuanfen ?? 0) < cost) { this.setNotice('缘分丹不足'); return [] }
     this.state.inventory.yuanfen -= cost
@@ -1918,6 +2465,8 @@ class GameStore {
    * 上阵中的角色不能卖，防止手滑把正在用的队友卖掉；身上装备原样退回背包。
    */
   releaseChar(id: string) {
+    const fwd = this.delegate<void>('releaseChar', { charId: id })
+    if (fwd) return fwd
     const cdef = CHAR_MAP[id]
     const entry = this.state.roster[id]
     if (!cdef || !entry) return
@@ -1972,6 +2521,8 @@ class GameStore {
 
   // ── 升星（v1.28.9：上限 50★、每 10 星一档品质，定数见 data.STAR_TIERS）────────
   starUp(id: string) {
+    const fwd = this.delegate<void>('starUp', { charId: id })
+    if (fwd) return fwd
     const entry = this.state.roster[id]
     const cdef = CHAR_MAP[id]
     if (!entry || !cdef) return
@@ -2004,7 +2555,14 @@ class GameStore {
    * 限时联动（v1.41）：活动结束后这两名不再可兑换。**只拦"还没拥有的"** ——
    * 已经拥有的走上面那条"已在名录中"，不该给玩家看到"活动已结束"这种莫名其妙的理由。
    */
-  redeemShard(charId: string): { ok: boolean; why?: string } {
+  redeemShard(charId: string): { ok: boolean; why?: string } | Promise<{ ok: boolean; why?: string }> {
+    // ⚠️ 这个 op 的返回值**带 `ok/why`**，服务端见 `result.ok === false` 会把它翻成
+    //    `reason:'refused'、`result` 变空 —— 所以不能走 `delegate`（那条路只透传
+    //    `result`），得把 `why` 翻译回引擎那套形状，界面的 `r.ok / r.why` 才照旧能读。
+    if (this.remote) {
+      return this.postAction<{ ok: boolean; why?: string }>('redeemShard', { charId })
+        .then(r => r.ok ? (r.result ?? { ok: true }) : { ok: false, why: r.why })
+    }
     const cdef = CHAR_MAP[charId]
     if (!cdef) return { ok: false, why: '没有这名武魂' }
     if (this.state.roster[charId]) return { ok: false, why: `${cdef.name} 已在名录中` }
@@ -2024,6 +2582,8 @@ class GameStore {
 
   // ── 装备：背包（equipBag）与角色已穿戴（roster[id].equip）之间互相移动 ──────────
   equipItem(charId: string, itemId: string) {
+    const fwd = this.delegate<void>('equipItem', { charId, itemId })
+    if (fwd) return fwd
     const entry = this.state.roster[charId]
     const idx = this.state.equipBag.findIndex(i => i.id === itemId)
     if (!entry || idx < 0) return
@@ -2036,6 +2596,8 @@ class GameStore {
   }
 
   unequipItem(charId: string, slot: EquipSlot) {
+    const fwd = this.delegate<void>('unequipItem', { charId, slot })
+    if (fwd) return fwd
     const entry = this.state.roster[charId]
     const item = entry?.equip[slot]
     if (!entry || !item) return
@@ -2101,7 +2663,9 @@ class GameStore {
    * v1.38.2：最高阶武器（canUndoReforge）在重掷前把**洗之前那条词条**记进 state.reforgeUndo，
    * 玩家可以换回（见 undoReforge）。其余装备不记账，也不会清掉别人那份快照。
    */
-  reforgeEquip(itemId: string, idx: number): ReforgeResult {
+  reforgeEquip(itemId: string, idx: number): ReforgeResult | Promise<ReforgeResult> {
+    const fwd = this.delegate<ReforgeResult>('reforgeEquip', { itemId, idx })
+    if (fwd) return fwd
     const item = this.findEquip(itemId)
     if (!item) return { ok: false, why: '找不到这件装备' }
     if (!item.extra?.[idx]) return { ok: false, why: '没有这条词条（先天词条不可洗练）' }
@@ -2140,7 +2704,9 @@ class GameStore {
    * （洗练本身是固定价、可无限次重复的动作，见 reforgeCost）。换回是一次性的后悔药，
    * 用掉即消失——快照清空后不能再"反悔回新词条"。
    */
-  undoReforge(itemId: string): ReforgeResult {
+  undoReforge(itemId: string): ReforgeResult | Promise<ReforgeResult> {
+    const fwd = this.delegate<ReforgeResult>('undoReforge', { itemId })
+    if (fwd) return fwd
     const snap = this.state.reforgeUndo
     if (!snap || snap.itemId !== itemId) return { ok: false, why: '没有可换回的洗练记录' }
     const item = this.findEquip(itemId)
@@ -2206,7 +2772,9 @@ class GameStore {
    * 强化吃的是玩家挂机几十小时攒的结晶/精血，"差最后一级就一级都不升"只会让按钮变成摆设。
    * `why` 仍然带回失败原因，UI 可以照样显示"精血不足"。
    */
-  enhanceEquip(itemId: string, times = 1): EnhanceResult {
+  enhanceEquip(itemId: string, times = 1): EnhanceResult | Promise<EnhanceResult> {
+    const fwd = this.delegate<EnhanceResult>('enhanceEquip', { itemId, times })
+    if (fwd) return fwd
     const item = this.findEquip(itemId)
     if (!item) return { ok: false, levels: 0, why: '找不到这件装备' }
     const cap = equipEnhCap(item.quality)
@@ -2451,7 +3019,9 @@ class GameStore {
    * 所以理论上可能不是全局最优。2026-09-14 的 200 轮随机小实例模糊测试（3 人以内、与暴力枚举
    * 对比）在补上 ③ 之后为 200/200 一致，见 design/数值设计.md。
    */
-  autoEquipBest(): { changed: number; powerGain: number } {
+  autoEquipBest(): { changed: number; powerGain: number } | Promise<{ changed: number; powerGain: number }> {
+    const fwd = this.delegate<{ changed: number; powerGain: number }>('autoEquipBest', {})
+    if (fwd) return fwd
     const ids = this.teamIds()
     if (!ids.length) return { changed: 0, powerGain: 0 }
     const rawPower = () => ids.reduce((s, id) => s + this.powerOf(id), 0)
@@ -2560,7 +3130,9 @@ class GameStore {
    * 满强化圣装是 2400 万结晶 + 4800 精血的投入，一次点错就归零是不可接受的；
    * 但也不是全额退——全额退等于强化材料可以随意搬运，强化就不再是"这件装备"的投入了。
    */
-  breakdownEquip(itemId: string): { essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } | null {
+  breakdownEquip(itemId: string): { essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } | null | Promise<{ essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } | null> {
+    const fwd = this.delegate<{ essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } | null>('breakdownEquip', { itemId })
+    if (fwd) return fwd
     const idx = this.state.equipBag.findIndex(i => i.id === itemId)
     if (idx < 0) return null
     const item = this.state.equipBag[idx]
@@ -2608,7 +3180,9 @@ class GameStore {
   }
 
   /** 一键分解所有垃圾装备（强化过的会连带退还材料，与单件分解同一条路径） */
-  breakdownJunk(): { count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } {
+  breakdownJunk(): { count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } | Promise<{ count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number }> {
+    const fwd = this.delegate<{ count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number }>('breakdownJunk', {})
+    if (fwd) return fwd
     let count = 0, essence = 0, xuanjing = 0, refundCrystal = 0, refundEssence = 0
     const keep: EquipItem[] = []
     for (const item of this.state.equipBag) {
@@ -2633,6 +3207,8 @@ class GameStore {
 
   // ── 炼丹（灵药+灵金 → 指定品阶丹药，缓解突破材料瓶颈）───────────────────────
   craftPill(grade: number) {
+    const fwd = this.delegate<void>('craftPill', { grade })
+    if (fwd) return fwd
     const pill = PILLS.find(p => p.grade === grade)
     if (!pill) return
     const cost = pillCraftCost(grade)
@@ -2680,6 +3256,8 @@ class GameStore {
   }
 
   buyShopItem(goodId: string) {
+    const fwd = this.delegate<void>('buyShopItem', { goodId })
+    if (fwd) return fwd
     const g = SHOP_GOODS.find(x => x.id === goodId)
     if (!g) return
     const price = this.shopPrice(goodId)
@@ -2711,7 +3289,21 @@ class GameStore {
   }
 }
 
-export const game = new GameStore()
+/**
+ * 浏览器侧的全局单例。**服务端不用它** —— 服务端要的是「一个玩家一个实例」，
+ * 用的是上面导出的 `GameStore` 类本身（见 SPEC §4.4）。
+ *
+ * 服务端在 `require` 本模块**之前**把 `globalThis.__DOUPO_SERVER__` 设成 `true`：
+ * 这样这个单例不会启动任何定时器 —— 否则 Node 进程会白白多出 4 个后台循环
+ * （100ms tick、2 秒落盘、两条 3 分钟的远程配置轮询），而服务端一个都用不上。
+ */
+const SERVER_SIDE = (globalThis as { __DOUPO_SERVER__?: boolean }).__DOUPO_SERVER__ === true
+/**
+ * 浏览器那个单例。`remote` 由 `main.tsx` **在 import 本模块之前**通过 `remoteMode.ts` 定下 ——
+ * 引擎构造时就要决定开不开 100ms tick / 2s 落盘，晚一步就来不及了（见 remoteMode.ts 头注释）。
+ * 服务端那份产物永远 `remote: false`：它自己就是权威，没有"远端"可言。
+ */
+export const game = new GameStore({ autoLoop: !SERVER_SIDE, remote: !SERVER_SIDE && isRemoteMode() })
 ;(window as unknown as { __game: GameStore }).__game = game
 
 export function useGame(): GameState {

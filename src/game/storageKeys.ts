@@ -16,6 +16,24 @@ export const SAVE_BAK_KEY = `${PREFIX}doupo-idle-save-v1.bak`
 /** 云存档的本地元数据（上次上传时间与指纹），不存进度，丢了只会多传一次 */
 export const SAVE_META_KEY = `${PREFIX}doupo-idle-cloud-meta`
 /**
+ * 「本机这份存档属于谁」—— 上一次对齐云端时的 playerId（v2.0 账号体系）。
+ *
+ * 存在的理由：存档是**单键**的（`SAVE_KEY`），不按 playerId 分家，而改 `SAVE_KEY` 的键名
+ * 等于把全服玩家的进度清零，绝不能动。于是「这份档属于哪个账号」只能另记一处。
+ *
+ * ⚠️ 它**不是进度**：丢了只会让下一次对齐多做一次"这是不是我的档"的判断（判不出来时按
+ *    "是我的"处理，即维持现状）。**绝不要拿它当判据去丢档**。
+ */
+export const SAVE_OWNER_KEY = `${PREFIX}doupo-idle-save-owner`
+/**
+ * 被「换账号」挤走的本地档（单槽，只留最近一次）。
+ *
+ * ⚠️ 键名必须是 `SAVE_KEY + '.switched'`，**绝不能是 `SAVE_KEY + '.bak'`** ——
+ *    引擎 `load()` 的兜底顺序是 `SAVE_KEY → SAVE_KEY+'.bak'`，写成 .bak 就会被读回来，
+ *    换账号等于没换（串档照旧）。`.switched` 不在那个序列里，引擎永远看不见它。
+ */
+export const SAVE_SWITCHED_KEY = `${PREFIX}doupo-idle-save-v1.switched`
+/**
  * 消消乐音效开关（v1.40）。**不是进度**：丢了只会把声音恢复成默认的"开"，
  * 不影响存档，也从不参与云同步。加它是新键名 —— 老键名一个没动，不存在迁移。
  */
@@ -26,3 +44,49 @@ export const SFX_MUTE_KEY = `${PREFIX}doupo-idle-sfx-mute`
  * 同样是**新键**、不是进度：丢了只会让海报再弹一遍，与存档 / 云同步无关。
  */
 export const LINK_POSTER_KEY = `${PREFIX}doupo-idle-link-poster`
+/**
+ * 账号会话令牌（v2.0 账号体系，SPEC §4.5.1）。**不是进度**：丢了只是要重新登录一次，
+ * 而这正是服务端权威相对「存档码即凭证」的最大差别 —— 存档本身在服务端完好无损。
+ *
+ * ⚠️ **必须带前缀**，理由与存档键不同：体验服与正式服是**两套后端**
+ * （`doupo-api.service:8787` / `doupo-api-test.service:8788`，各自的 `accounts.json` 与
+ * `sessions.json`），令牌在两边并不通用。若共用键名，在体验服登录一次会把正式服那份令牌
+ * 覆盖掉 —— 表现是"在另一个站上莫名其妙要重新登录"，很难往键名上想。
+ */
+export const AUTH_TOKEN_KEY = `${PREFIX}doupo-idle-token`
+/**
+ * 客户端模式开关（v2.0 阶段 3，SPEC §4.6）：`'client'` = 只渲染服务端状态（远程模式），
+ * `'local'` = 老行为（本机算账）。**不是进度**：它只决定"这台的页面怎么跑"，
+ * 两种模式下存档都是同一份（服务端权威 + 本机副本），切来切去不会丢任何东西。
+ *
+ * ⚠️ 为什么要这个键而不是只看构建参数：`?mode=local` 是**回滚开关** ——
+ *    线上出了问题，让玩家加一个参数就能退回老行为，不必等重新构建与部署。
+ *    而参数只在当次导航有效，所以选中后写进这个键，刷新/跳转都跟着走。
+ */
+export const MODE_KEY = `${PREFIX}doupo-idle-mode`
+/**
+ * 「已经为某个产物入口自动刷新过一次了」的护栏（`buildSentinel.ts`）。
+ *
+ * ⚠️ 存的是 **sessionStorage**（不是 localStorage）：它只活在这一个标签页里，
+ *    用完就该随标签页消失。**不是进度**，丢了最坏只是多刷一次页面。
+ *
+ * 为什么需要它：刷新页面会**清空模块内存**，所以"刷之前先记个内存标记"是死代码。
+ * 成环的唯一路径是"导航拿到旧 index.html、而 no-store 拉到的却是新的"（需要忽略
+ * `no-cache` 的中间层）。有这个键兜着，最坏情况是**每个入口最多自动刷一次**。
+ *
+ * ⚠️ **必须带前缀**，理由同 `AUTH_TOKEN_KEY`：体验服与正式服同源（按「协议+主机+端口」
+ *    隔离，**路径不参与**），共用键名会让在一个站上刷过之后，另一个站不再刷。
+ */
+export const SENTINEL_GUARD_KEY = `${PREFIX}doupo-idle-reloaded-entry`
+/**
+ * 游戏昵称的**本机缓存**（v1.53，SPEC §7）。
+ *
+ * ⚠️ 它**只是缓存**：昵称的权威副本在服务端（账号记录 `accounts[pid].nick` → 榜上既有的真名）。
+ *    本地这份丢了、或为空，客户端会去服务端要回来（`GET /nickname`）——
+ *    **绝不再拿它去覆盖权威副本**（那正是 2026-09-21 那次"换设备变成无名侠客"的事故）。
+ *
+ * ⚠️ **必须带前缀**，理由与 `AUTH_TOKEN_KEY` 完全同型：昵称现在是**服务端权威**，
+ *    而体验服与正式服是两套后端、两套账号库 ⇒ 共用键名会让在一个站上改的名字
+ *    覆盖掉另一个站的缓存。线上构建不注入前缀 ⇒ 键名与历史**逐字节相同**。
+ */
+export const NICK_KEY = `${PREFIX}doupo-idle-nickname`

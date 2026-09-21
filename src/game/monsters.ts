@@ -42,3 +42,27 @@ export function bossSpriteFor(form: number): string | undefined {
   const f = Math.max(1, Math.floor(Number(form)) || 1)
   return BOSS_SPRITES[`wb_t${f}`] ?? BOSS_SPRITES[`wb_t${Math.max(1, f - 1)}`] ?? BOSS_SPRITES.wb_t1
 }
+
+// ── 第二只世界 Boss 立绘（sprites/boss2/）───────────────────────────
+// 与第一只**分目录**，不是为了整齐：上面那句 `BOSS_FORM_MAX` 是"这个目录下有几张图"，
+// 混进同一个目录会把它一起数进去，于是第一只的形态档数**凭空多出第二只那张数** ——
+// 而服务端 `forms` 的档数、客户端立绘张数、`WB_BOSS_DEFAULT` 的档数三者必须相等，
+// 多出来的一档会让血条按一个不存在的形态去算。分开放，这个数就只数自己那一批。
+// ⚠️ 目录不存在时 glob 回空对象，所以立绘还没出的那些天 `BOSS2_FORM_MAX` 是 0 ——
+//    页面必须能接受 `boss2SpriteFor` 回 `undefined`（见 WorldBoss2View 的兜底块）。
+const boss2Modules = import.meta.glob('../assets/sprites/boss2/*.webp', { eager: true, import: 'default' }) as Record<string, string>
+
+const BOSS2_SPRITES: Record<string, string> = {}
+for (const [filePath, url] of Object.entries(boss2Modules)) {
+  const id = filePath.split('/').pop()!.replace('.webp', '')
+  BOSS2_SPRITES[id] = url
+}
+
+/** 第二只 Boss 手上到底有几张立绘。服务端 `WB2_BOSS_DEFAULT.forms` 的档数应当等于它 */
+export const BOSS2_FORM_MAX = Object.keys(BOSS2_SPRITES).length
+
+/** 第 `form` 形态的立绘。**就近退回**的规则与 `bossSpriteFor` 完全一致（理由见上） */
+export function boss2SpriteFor(form: number): string | undefined {
+  const f = Math.max(1, Math.floor(Number(form)) || 1)
+  return BOSS2_SPRITES[`wb2_t${f}`] ?? BOSS2_SPRITES[`wb2_t${Math.max(1, f - 1)}`] ?? BOSS2_SPRITES.wb2_t1
+}
