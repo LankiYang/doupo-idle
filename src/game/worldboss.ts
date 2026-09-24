@@ -40,6 +40,8 @@ export const WB_POLL_MS = 60 * 1000
 export const WB_COOLDOWN_MS = 2000
 
 const API = `${import.meta.env.BASE_URL}api/worldboss`
+const STATE_API = `${API}/state`
+const ACTION_API = `${API}/action`
 
 export interface WbBoss { name: string; form: number; formLabel: string }
 export interface WbMe {
@@ -404,14 +406,14 @@ export function parseReport(raw: unknown): WbReport {
 
 /** 拉全服状态。网络失败/404 直接抛，由调用方吞掉 —— 讨伐页拉不到不该影响游戏本身 */
 export async function fetchWorldBoss(): Promise<WbState> {
-  const res = await apiFetch(`${API}?playerId=${encodeURIComponent(getPlayerId())}`, { cache: 'no-store' })
+  const res = await apiFetch(`${STATE_API}?playerId=${encodeURIComponent(getPlayerId())}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return parseWorldBoss(await res.json())
 }
 
 /** 上报一次讨伐。注意 ok:false 也**不是网络错误**（冷却/已击败/本期已结束），照常返回回执 */
 export async function reportDamage(damage: number, clears = 0, tiles = 0): Promise<WbReport> {
-  const res = await apiFetch(API, {
+  const res = await apiFetch(ACTION_API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -462,7 +464,7 @@ function metricsForRemote(clears: number, tiles: number): Record<string, number>
  *    调用方要把它当成"没重启"处理，别当成网络错误去重试。
  */
 export async function restartWorldBoss(): Promise<{ ok: boolean; restarted: boolean; reason: string }> {
-  const res = await apiFetch(API, {
+  const res = await apiFetch(ACTION_API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ playerId: getPlayerId(), action: 'restart' }),
@@ -495,7 +497,7 @@ export async function restartWorldBoss(): Promise<{ ok: boolean; restarted: bool
 export async function crowdfundWorldBoss(amount: number): Promise<{
   ok: boolean; crowdfunded: boolean; donated: number; filled: boolean; reason: string
 }> {
-  const res = await apiFetch(API, {
+  const res = await apiFetch(ACTION_API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ playerId: getPlayerId(), action: 'crowdfund', amount: Math.floor(amount) }),

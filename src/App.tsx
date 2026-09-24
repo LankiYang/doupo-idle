@@ -8,19 +8,22 @@ import LabView from './components/LabView'
 import EquipmentView from './components/EquipmentView'
 import LeaderboardView from './components/LeaderboardView'
 import SaveView from './components/SaveView'
-import NewbiePath from './components/NewbiePath'
+import Onboarding from './components/Onboarding'
+import StoryGate from './components/StoryGate'
+import StoryView from './components/StoryView'
 import MailBox from './components/MailBox'
 import Ico from './components/Ico'
 import { buffSprite } from './game/icons'
 import WorldBossTab, { WB2_TAB_ON } from './components/WorldBossTab'
 import ActivityView from './components/ActivityView'
+import Advisor from './components/AdvisorView'
 import { useGame, game } from './game/engine'
 import { SHOP_BUFFS } from './game/data'
 import { startCloudSync } from './game/saveApi'
 import { startWorldBossSync } from './game/worldboss'
 import { startWorldBoss2Sync } from './game/worldboss2'
 
-export type Tab = 'roster' | 'combat' | 'boss' | 'activity' | 'recruit' | 'shop' | 'lab' | 'equipment' | 'leaderboard' | 'save'
+export type Tab = 'story' | 'roster' | 'combat' | 'boss' | 'activity' | 'recruit' | 'shop' | 'lab' | 'equipment' | 'leaderboard' | 'save'
 
 /**
  * 顺序即优先级。**战斗排第一**（v1.32）：这是个挂机游戏，战斗页是主屏——
@@ -46,6 +49,12 @@ export type Tab = 'roster' | 'combat' | 'boss' | 'activity' | 'recruit' | 'shop'
  */
 const TABS_ALL: { id: Tab; label: string }[] = [
   { id: 'combat', label: '战斗' },
+  // ⚠️ 「旅程」这一格 v1.60 **已撤**（用户 2026-09-22：「**旅程也不要了，就只剩蒙层引导**，
+  //    引导去 tab 里面的战斗模块，**不要自己单独做个旅程模块的战斗**」）。
+  //    撤掉的只是**入口**，`StoryView` 与全部剧情内容一个字没删 ——
+  //    门留在战斗页那条状态行上（`data-onb="story-door"`），是条随时可点的细线。
+  //    这就是"弱剧情"：它不再占打头的第二格，但也没有消失。
+  //    ⚠️ 别把下面 `tab === 'story'` 那条渲染分支一起删掉 —— 删了那扇门就指向一片空白。
   { id: 'roster', label: '阵容' },
   { id: 'equipment', label: '装备' },
   // 世界 Boss 的合并入口：里面是「集结讨伐」+「连线讨伐」两个子页签。
@@ -197,8 +206,17 @@ export default function App() {
                `transform`/`filter`/`contain` 会创建包含块）—— 改动这附近的布局时要留意这条。 */}
         <MailBox />
       </div>
-      <NewbiePath onNavigate={navigate} activeTab={tab} />
+      {/* 常驻「新手之路」条 v1.58 **已删**：用户要求把引导收成一条强制流水线
+          （「把原有的那个新手引导代替，全部用蒙层引导」），三步软提示并入
+          `onboardSteps`，由下面的 `Onboarding` 蒙层逐步接管。
+          ⚠️ 别再把它加回来 —— 一条不拦人的进度条与蒙层并存时，
+             两者会给**同一个玩家**两个不同的"现在该做什么"。 */}
       {tab === 'roster' && <RosterView focusId={rosterFocus} onFocusConsumed={() => setRosterFocus(null)} />}
+      {/* 剧情页 v1.60：**不再有页签，但这一条必须留着**。
+          它是 `StoryView` 唯一的挂载点，战斗页那条「剧情 ›」细线（`data-onb="story-door"`）
+          点的就是 `navigate('story')` —— 拆掉它，那扇门后面就是一片空白。
+          （`Tab` 类型里的 `'story'` 同理，别顺手清掉。） */}
+      {tab === 'story' && <StoryView onNavigate={navigate} />}
       {tab === 'combat' && <CombatView onNavigate={navigate} />}
       {tab === 'equipment' && <EquipmentView />}
       {/* 世界 Boss：合并入口。两只玩法在**组件内部**用子页签切（见 WorldBossTab.tsx）——
@@ -211,6 +229,23 @@ export default function App() {
       {tab === 'lab' && <LabView />}
       {tab === 'leaderboard' && <LeaderboardView />}
       {tab === 'save' && <SaveView />}
+      {/* AI 军师云韵（v1.56）。**自包含**：入口悬浮按钮 + 全屏聊天浮层都在组件内部，
+          所以它不进 TABS（理由见 AdvisorView 文件头：用户刚把页签从 11 个并到 10 个）。
+          ⚠️ 放在 `StoryGate` **之前**：两者都是 `z-50`，同层级下 DOM 靠后的赢 ——
+             新手引导就该盖住军师（那期间玩家还不该问"我该练谁"）。 */}
+      <Advisor />
+      {/* 阻断式新手引导（v1.54）。**放在最后**：它是 `fixed inset-0 z-50`，
+          盖住 Header / 页签条 / 当前页 —— 存档里该拦的时候它就该盖住一切。
+          老玩家这里每 100ms 白跑一次 `storyGate()`：那是三个字段的判断，可忽略。
+          ⚠️ 它**不接管 tick**，被拦住的玩家离线收益照走（见 StoryGate.tsx 文件头）。 */}
+      <StoryGate onNavigate={navigate} />
+      {/* 蒙层式**强制**引导（v1.58）。**放在最后 = 盖在所有东西之上**（z-[70]，
+          比 StoryGate / 军师那两层 z-50 还高）。
+          与 StoryGate 的分工是一条线切开的：`onboardCurrent` 返回 `screen` 的那几步
+          （序章 / 立誓 / 手册）由 StoryGate 演，返回 `do` 的那几步（去打架 / 去修炼 /
+          去装备……）由这里挖洞 —— 同一时刻只可能有一个在渲染（`kind` 二选一）。
+          ⚠️ 它只读 `getBoundingClientRect()`，一个样式都不往目标上写（理由见该文件头 ②）。 */}
+      <Onboarding onNavigate={navigate} activeTab={tab} />
     </div>
   )
 }

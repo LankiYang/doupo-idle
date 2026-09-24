@@ -51,10 +51,12 @@ export const WB2_POLL_MS = WB_POLL_MS
 export const WB2_COOLDOWN_MS = WB_COOLDOWN_MS
 
 const API = `${import.meta.env.BASE_URL}api/worldboss2`
+const STATE_API = `${API}/state`
+const ACTION_API = `${API}/action`
 
 /** 拉全服状态。网络失败/404 直接抛，由调用方吞掉 —— 讨伐页拉不到不该影响游戏本身 */
 export async function fetchWorldBoss2(): Promise<WbState> {
-  const res = await apiFetch(`${API}?playerId=${encodeURIComponent(getPlayerId())}`, { cache: 'no-store' })
+  const res = await apiFetch(`${STATE_API}?playerId=${encodeURIComponent(getPlayerId())}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   // ⚠️ 第二只的形态档数按**自己的**立绘张数夹（两只 Boss 的立绘张数可以不同）
   return parseWorldBoss(await res.json(), BOSS2_FORM_MAX)
@@ -67,7 +69,7 @@ export async function fetchWorldBoss2(): Promise<WbState> {
  * 没有 `tiles` 参数 —— 连连看没有"格"，见文件头 ③。
  */
 export async function reportLinkDamage(damage: number, clears = 0): Promise<WbReport> {
-  const res = await apiFetch(API, {
+  const res = await apiFetch(ACTION_API, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

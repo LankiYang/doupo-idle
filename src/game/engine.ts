@@ -6,9 +6,9 @@ import {
   stageStats, isBossStage, zoneForStage, monsterForStage, stageCoinReward,
   labStats, isLabBoss, labDaolingReward, labHerbReward,
   labPillCost, LAB_ESSENCE_COST, LAB_ESSENCE_AMOUNT, LAB_HERB_COST, LAB_HERB_AMOUNT,
-  enemyUnitsForStage, enemyUnitsForFloor, DUTY_OF_ROLE, bondBonusesFor,
+  enemyUnitsForStage, enemyUnitsForFloor, enemyUnitsForStory, scaleStoryEnemiesForParty, DUTY_OF_ROLE, bondBonusesFor,
   MAX_STARS, starUpCost, starMultOf, starTierIndex, starTierOf, DUPE_SHARD,
-  shardCostOf, recruitPoolOf, linkActive, isLinkChar, linkClosedText,
+  shardCostOf, recruitPoolOf, linkGettable, linkClosedText,
   refundOf, refundPillsOf, charInvestment,
   PITY_TIAN, PITY_QUASI, PITY_SHENG, PITY_TIAN_UPGRADE,
   rollEquip, rollEquipQuality, equipAffixSum, EQUIP_BREAKDOWN, EQUIP_REFORGE, rollReforgedAffix, canUndoReforge,
@@ -29,10 +29,18 @@ import {
 export { parseActivities } from './activities'
 // 同上：服务端宿主用它解析 `rewards/rewards.json`（全服福利在服务端权威下必须由服务端发）
 export { parseRewards } from './rewards'
+// 剧情数据从引擎入口再导出，理由与上面两条一样：**服务端产物只能有一个入口**
+// （`dist-engine/engine.cjs`）。离线校验脚本要拿节点表/序章做对账，
+// 服务端要拿节点表做前置校验，各自再去 require 一份 story.ts 就是第二份真相。
+export { PROLOGUE, CHAPTER1, CHAPTER1_ACTS, SCRIPTS, HANDBOOK, STORY_UNLOCK_NODE, ALL_NODE_IDS } from './story'
 import { mailGiftKey, type Mail } from './mail'
 import { SAVE_KEY, SAVE_BAK_KEY } from './storageKeys'
 import { apiFetch } from './authApi'
 import { getRemotePid, isRemoteMode } from './remoteMode'
+import {
+  PROLOGUE, CHAPTER1, CHAPTER1_ACTS, SCRIPTS, HANDBOOK, STORY_UNLOCK_NODE, ALL_NODE_IDS,
+  type StoryNode, type ScriptLine, type PrologueAct, type HandbookStep, type StoryAct,
+} from './story'
 
 export interface RosterEntry { level: number; xp: number; stars: number; equip: Partial<Record<EquipSlot, EquipItem>> }
 
@@ -96,7 +104,7 @@ export interface BattleState {
  * 「who 永远指我方」是刻意的——FighterCard 靠 `e.who === id` 找自己该播的动画，
  * 让它同时兼作敌方标识会把每个受击分支都拆成两半。
  */
-export interface CombatEvent { type: 'dmg' | 'heal' | 'monsterDmg' | 'kill' | 'drop' | 'down'; value: number; who?: string; item?: string; time: number; source: 'main' | 'lab'; crit?: boolean; boss?: boolean; target?: string; from?: string; atkStyle?: AtkStyle;
+export interface CombatEvent { type: 'dmg' | 'heal' | 'monsterDmg' | 'kill' | 'drop' | 'down'; value: number; who?: string; item?: string; time: number; source: 'main' | 'lab' | 'story'; crit?: boolean; boss?: boolean; target?: string; from?: string; atkStyle?: AtkStyle;
   /**
    * `drop` 专用：这一笔是不是**首通奖励**（天梯塔的论道令 / 缘分丹是，每层的灵药不是）。
    * 界面据此把同一类事件渲染成两种说法 —— 少了它，"每层都掉灵药"会被写成"首通奖励 灵药"。
@@ -185,7 +193,12 @@ interface FighterStats { atk: number; def: number; hp: number; critRate: number;
 interface FightRoundCfg {
   /** 当前这一波的战斗快照。`rounds` / `fighterDebuff` 会被本回合**写回**（前者给敌方治疗量衰减用），故不是只读视图 */
   b: { enemies: EnemyUnit[]; fighterHp: Record<string, number>; rounds?: number; fighterDebuff?: Record<string, ControlDebuff> }
-  source: 'main' | 'lab'
+  /**
+   * 事件来源。**三个值互不透传**：CombatView 只捞 `'main'`、LabView 只捞 `'lab'`、
+   * 剧情战斗只捞 `'story'`。剧情战斗的那几条飘字要是混进主线日志，
+   * 玩家会看到自己在乌坦城打着"云岚宗外门弟子"的同时，主线战场蹦出同一批人的伤害数字。
+   */
+  source: 'main' | 'lab' | 'story'
   statsOf: (id: string) => FighterStats | null
   /** 无视敌人防御的比例（0~1），来自塔的「破甲式」祝福 */
   pierce: number
@@ -203,6 +216,38 @@ interface FightRoundCfg {
 
 export interface LabBattleState {
   floor: number
+  enemies: EnemyUnit[]
+  roundTimer: number
+  fighterHp: Record<string, number>
+  /** 见 BattleState.rounds */
+  rounds?: number
+  /** 见 BattleState.fighterDebuff */
+  fighterDebuff?: Record<string, ControlDebuff>
+}
+
+/**
+ * 剧情战斗（v1.55）。
+ *
+ * 用户 2026-09-22：「**战斗你可以剧情的战斗不和主线战斗耦合**」。
+ *
+ * ── 为什么不是复用 `state.battle` ──────────────────────────────────────
+ * 主线战斗跑在 `stage`/`farmStage`/`wipeStreak` 这一整套推进机器上：赢了会推关、
+ * 输了会记团灭、挂机会自动续。剧情要的恰恰相反 —— 它是**可以重打、不推进任何东西、
+ * 打不过也不该影响主线**的一场戏。挂在主线上的直接后果是玩家读完第一幕去打两个
+ * 萧家子弟，赢了之后**主线跳了一关**。
+ *
+ * ── 为什么不复用 `state.lab.battle` ────────────────────────────────────
+ * 天梯塔那套带着楼层、祝福、三选一、最高层记录，比需要的重得多，而且
+ * 共用会让两者**互相打断**（一边在爬塔时点进剧情，塔的进度就没了）。
+ *
+ * 所以这里是**第三份**、也是刻意最薄的一份战斗状态：一场、一波敌人、打完就散。
+ * 结构上与 `LabBattleState` 同形（`fightRound` 的 `b` 参数接受的就是这个形状），
+ * 差别只在于没有 `floor`，代之以 `nodeId` —— 因为剧情战斗的"第几层"这个概念不存在，
+ * 它只有"这是哪一格戏"。
+ */
+export interface StoryBattleState {
+  /** 正在打的是哪一格（`CHAPTER1` 里的 id）。打赢即调 `claimStoryNode(nodeId)` */
+  nodeId: string
   enemies: EnemyUnit[]
   roundTimer: number
   fighterHp: Record<string, number>
@@ -258,6 +303,122 @@ export interface GameState {
   gifts: Record<string, number> // 一次性发放的领取标记：发放 id → 领取时间戳（防重复发，见 GIFTS）
   /** 活动中心进度（v1.42）。老存档没有这个字段 ⇒ sanitizeActivityState 补一份空的 */
   activities: ActivityState
+  /** 新手引导与第一章剧情进度（v1.54）。老存档 ⇒ 见 sanitizeStoryState 的"已完成"兜底 */
+  story: StoryState
+  /**
+   * 进行中的剧情战斗（v1.55）。
+   *
+   * ⚠️ **这个字段刻意不进存档**：`migrate` 里一律置 null（见那一段的注释）。
+   *    剧情战斗是几秒钟的一场戏，不是主线那种会挂机跑半小时的东西；
+   *    为它写一整套净化逻辑（敌人数组、双方血量、控制减益…）要几十行，
+   *    而换来的只是"关掉页面再打开能接着打" —— 玩家重进这一格就是重打一遍，
+   *    感官上根本没有差别。这是**故意用一点体验换掉一整类存档损坏**。
+   */
+  storyBattle: StoryBattleState | null
+}
+
+/**
+ * 新手引导 / 第一章剧情的进度（v1.54，文案与节点表在 game/story.ts）。
+ *
+ * ── 为什么这份状态**进存档**而不是只放 localStorage ──────────────────
+ * 本作是服务端权威（SPEC §4.4）：客户端的写入在下一帧就会被权威态覆盖。
+ * 引导进度要是只存本地，玩家换个设备就得从头看六幕序章，
+ * 而更糟的是**老玩家**会在新设备上被重新拦一次 —— 这正是要避免的事。
+ *
+ * ── 为什么用 `done: string[]` 而不是位图 / 数字进度 ────────────────────
+ * 节点表将来会变长、会分叉（案例的章节地图就是 12 个节点带前置锁，
+ * 不是一条直线）。存 id 数组，加节点、插节点、把节点挪到别的章都不用改存档结构。
+ * 代价是一个玩家最多存几十个短字符串 —— 相对 2MB 的存档上限可以忽略。
+ */
+export interface StoryState {
+  /** 序章看到第几幕（1-based）。看完六幕 = PROLOGUE.length，组件据此判断"要不要放序章" */
+  prologueAct: number
+  /** 已完成节点的 id。**顺序不保证**，判断一律用 includes（见 storyDone） */
+  done: string[]
+  /**
+   * 报过道号了没有 —— 「入门登记」那一步是不是已经跨过去。
+   *
+   * ⚠️ **这里刻意不存名字本身**。名字的唯一权威是账号昵称（`nickname.ts` + 服务端 `POST /nickname`，
+   * v1.53 刚把这件事收口）。在存档里再存一份 `name`，两个字段迟早会不一致
+   * （玩家在群雄榜改名，剧情里的称呼却还是旧的），而那时没人说得清以哪个为准。
+   * 台词里的 `{name}` 由组件现取现用（`loadNick() || getAuthNick()`），取不到就回落到「你」。
+   */
+  enrolled: boolean
+  /** 手册看过了 */
+  handbook: boolean
+  /**
+   * **已永久解禁**：不再被阻断式引导拦截，退回非阻断的 NewbiePath 条。
+   * ⚠️ 单向标记，一旦 true 永不复位（判据见 story.ts 的 STORY_UNLOCK_NODE）。
+   * 不能拿"当前进度到没到 1-4"来代替它 —— 存档被手改 / 节点表调整都可能让进度倒退，
+   * 那会把已经上手的玩家**重新关回引导里**，是最不可接受的一种 bug。
+   */
+  finished: boolean
+}
+
+function freshStoryState(): StoryState {
+  return { prologueAct: 1, done: [], enrolled: false, handbook: false, finished: false }
+}
+
+/**
+ * 读档时的净化。分两种情况，**方向是反的**，别写反：
+ *
+ *   · 存档里**有** `story` 字段（本版本之后写过的档）⇒ 逐字段净化，坏值回落到默认。
+ *   · 存档里**没有** `story` 字段（这个版本之前的老档）⇒ 按"这把号已经玩过了"处理。
+ *
+ * 第二条为什么这么定：老玩家明天打开游戏，如果被判成新号，会被六幕序章 + 登记 + 手册
+ * 连拦三道 —— 对一个玩了很久的人来说，这是最像"游戏坏了"的一种表现。
+ * 但也不能一律跳过：**在这个版本上线后才注册、还什么都没干的新号**，
+ * 他们的第一份存档同样没有 `story` 字段（注册时存的是当时的 freshState）。
+ * 所以判据看"到底动没动过"，三个条件任一成立即视为已玩过：
+ *   最高关卡 > 1 / 击杀数 > 0 / 名册超过起始四人。
+ * 三条件都不成立 = 真的一步没走，那就让他走一遍引导（这正是我们要的那批人）。
+ */
+function sanitizeStoryState(raw: unknown, playedBefore: boolean): StoryState {
+  const base = freshStoryState()
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    // 没有这个字段：老档走"已解禁"，新号走"从头开始"
+    return playedBefore ? { ...base, prologueAct: PROLOGUE.length + 1, handbook: true, finished: true } : base
+  }
+  const o = raw as Record<string, unknown>
+  const act = Number(o.prologueAct)
+  return {
+    // 幕号 clamp 到 [1, 幕数+1]：写成 1e9 会让序章永远放不完，写成 0/NaN 会让它永远从头开始
+    prologueAct: Number.isFinite(act) ? Math.max(1, Math.min(PROLOGUE.length + 1, Math.floor(act))) : base.prologueAct,
+    // 只保留**节点表里真的存在**的 id：被删掉的老节点留着只会让 1-12 的"X/12"永远差一格
+    done: Array.isArray(o.done) ? [...new Set(o.done.filter((x): x is string => typeof x === 'string' && ALL_NODE_IDS.has(x)))] : [],
+    enrolled: o.enrolled === true,
+    handbook: o.handbook === true,
+    // ⚠️ 只认 === true。坏值一律当没解禁（宁可让引导多拦一次，也不能把没走完的人放出去）
+    finished: o.finished === true,
+  }
+}
+
+/**
+ * 「这份老档到底玩过没有」—— 决定没有 `story` 字段的存档要不要走引导。
+ *
+ * 三个条件任一成立即算玩过（**宁可判成玩过**：错放的代价是把老玩家拦在序章里，
+ * 错收的代价只是让一个"注册了但没动过"的号少看一段引导，两者不对等）：
+ *   · 最高关 > 1              —— 推过关
+ *   · `kills > 0`             —— 打过架
+ *   · 名册比起始四人多        —— 抽过卡 / 领过角色
+ *
+ * ⚠️ 最高关要**照抄 migrate 自己的回落链**（`highestStage ?? stage`），不能只看 `highestStage`。
+ *    2026-09-22 拿 49 份线上真档实跑时抓到两份反例：`highestStage` 字段根本没有、
+ *    只有 `stage: 7`，`kills` 也没有，名册里就 1 个角色 —— 三条全不成立。
+ *    照原样写会把这两个明显玩过的号拦进六幕序章。凡是"从老档里读一个数"，
+ *    判据必须跟 migrate 读的是同一个，否则就是同一件事两份实现。
+ *
+ * ⚠️ 入参 `roster` 用的是**已经净化过的那份**（见 migrate 里 roster 的构造），不是 `parsed.roster`：
+ * 畸形档里 `roster` 可能是字符串或数组，直接 `Object.keys` 出来的长度毫无意义。
+ */
+function playedBeforeStory(parsed: Partial<GameState>, roster: Record<string, RosterEntry>): boolean {
+  // 与 migrate 里 `highestStage` 那一段逐字同源
+  const hs = Number.isFinite(parsed.highestStage as number) ? (parsed.highestStage as number)
+    : (Number.isFinite(parsed.stage as number) ? (parsed.stage as number) : 1)
+  if (hs > 1) return true
+  const k = Number(parsed.kills)
+  if (Number.isFinite(k) && k > 0) return true
+  return Object.keys(roster).length > STARTER_IDS.length
 }
 
 /**
@@ -405,7 +566,15 @@ function freshState(): GameState {
     roster,
     team: { front: ['yellow_disciple', 'yellow_mercenary', null], back: ['yellow_bandit', 'yellow_hunter', null] },
     equippedFire: null,
-    inventory: { coin: 200, yuanfen: 5, crystal: 0, herb: 0, essence: 0, daoling: 0 },
+    // ⚠️ v1.60：`crystal` / `essence` / 那件武器**改成开局就发**，不再靠"序章战斗首通"。
+    //    用户 2026-09-22 把剧情从引导链路里拿掉（「不要自己单独做个旅程模块的战斗」）之后，
+    //    那格战斗不再是新号必经的一步，而后面"第一次修炼 / 第一次装备 / 第一次强化"
+    //    三步是**强制**的 —— 它们分别要 20 结晶、一件装备、800 结晶 + 2 精血，
+    //    新号开局这几样**全是 0，不发就必然卡死**（卡住的是强制引导，玩家连绕过去的机会都没有）。
+    //    这不是推断：`story.ts` 的 `0-1` 那格注释里早就写着"不发就必然卡死"。
+    //    ★ 数值**原样照抄**那格的首通奖励（coin 200 / crystal 1000 / essence 5 / 一件黄品武器），
+    //      再叠上原本就有的开局 200 铜钱 ⇒ **新手经济一分钱没变**，变的只是"什么时候到手"。
+    inventory: { coin: 400, yuanfen: 5, crystal: 1000, herb: 0, essence: 5, daoling: 0 },
     battle: null,
     autoBattle: false,
     stage: 1,
@@ -424,7 +593,9 @@ function freshState(): GameState {
     notice: '',
     lastTick: Date.now(),
     combatEvents: [],
-    equipBag: [],
+    // v1.60：那件"第一件装备"也改成开局发（原本是序章战斗首通发的）。
+    // 走 `rollEquip` —— 与常规掉落**同一个工厂**，属性口径不会漂。
+    equipBag: [rollEquip('weapon', 'yellow')],
     reforgeUndo: null,
     buffs: [],
     shop: { date: todayKey(), counts: {} },
@@ -432,6 +603,10 @@ function freshState(): GameState {
     // （新号想要的话就是改成 {}）。⚠️ migrate 里会显式覆盖 gifts，别删那一行。
     gifts: Object.fromEntries(GIFTS.map(g => [g.id, 0])),
     activities: freshActivityState(),
+    // 全新账号：序章从头放起、节点一个没做、还没登记（名字为空 ⇒ 登记那一步会拦住他）。
+    // ⚠️ 这里**刻意不预置 finished**：新号就是要走引导的那批人。
+    story: freshStoryState(),
+    storyBattle: null,
   }
 }
 
@@ -825,6 +1000,37 @@ export class GameStore {
     const pullCount = luckCount(parsed.pullCount)
     const shengCount = Math.min(luckCount(parsed.shengCount), pullCount)
 
+    // ── ★ v1.60 迁移：把"新手保底"补给**走到一半的存量新号** ────────────────────
+    // 背景：那件第一件装备、以及修炼/强化要用的结晶与精血，原本是**序章战斗 `0-1` 的首通奖励**。
+    // v1.60 把剧情从引导链路里摘掉之后（用户 2026-09-22「不要自己单独做个旅程模块的战斗」），
+    // 保底改由 `freshState()` **开局就发** —— 于是有一个窗口期：在那之前创建、还卡在
+    // 教程战斗之前或之中的存档，`equipBag` 是空的、结晶是 0，而新引导里
+    // "第一次修炼 → 第一次装备 → 强化" 是**强制**的（分别要 20 结晶 / 一件装备 / 800 结晶 + 2 精血）
+    // ⇒ **发不出东西的强制引导 = 玩家出不去**。`story.ts` 里 `0-1` 那格注释早就写着"不发就必然卡死"。
+    //
+    // ⚠️ 判据刻意**窄**，两条都必须读清楚再改：
+    //   · `!story.finished` —— 只补**还在引导里**的号。老玩家由 `sanitizeStoryState` 置了
+    //     `finished`，一根汗毛都不会被碰到；这与整张引导表"只对新号"的口径同源。
+    //   · `gifts['onboard-kit-v160']` —— **一次性**。幂等键借用现成的 `gifts` 表：
+    //     它本来就是"领过的直接跳过"的终身发放记录，随存档与云备份走。
+    //     **不新增存档字段** —— 存档结构是红线，而这个需求它本来就能满足。
+    //
+    // ⚠️ 只补**差额**（`Math.max`），不是无脑加：已经在别处挣到一部分的号不会被重复喂满。
+    //    这条也让整个分支**幂等**：就算某次没能写下幂等键，再跑一遍也不会多发。
+    // ⚠️ 数值**原样照抄** `freshState()` 那一行（coin 400 / crystal 1000 / essence 5 + 一件黄品武器）
+    //    —— 新手经济一分钱没变，变的只是"什么时候到手"。
+    const story = sanitizeStoryState(parsed.story, playedBeforeStory(parsed, roster))
+    const equipBag: EquipItem[] = Array.isArray(parsed.equipBag)
+      ? parsed.equipBag.map(sanitizeEquipItem).filter((x): x is EquipItem => !!x) : []
+    if (!story.finished && gifts['onboard-kit-v160'] === undefined) {
+      const atLeast = (cur: unknown, want: number) => Math.max(Number.isFinite(cur as number) ? (cur as number) : 0, want)
+      inventory.coin = atLeast(inventory.coin, 400)
+      inventory.crystal = atLeast(inventory.crystal, 1000)
+      inventory.essence = atLeast(inventory.essence, 5)
+      if (equipBag.length === 0) equipBag.push(rollEquip('weapon', 'yellow'))
+      gifts['onboard-kit-v160'] = Date.now()
+    }
+
     const out: GameState = {
       ...base,
       ...parsed,
@@ -839,7 +1045,7 @@ export class GameStore {
       lastProgressAt: Number.isFinite(parsed.lastProgressAt as number) ? (parsed.lastProgressAt as number) : Date.now(),
       lab: { ...base.lab, ...(parsed.lab ?? {}), battle: null },
       combatEvents: [],
-      equipBag: Array.isArray(parsed.equipBag) ? parsed.equipBag.map(sanitizeEquipItem).filter((x): x is EquipItem => !!x) : [],
+      equipBag,
       // v1.38.2 老存档一律没有这个字段 ⇒ sanitizeReforgeUndo(undefined) = null，键存在但不影响任何老行为
       reforgeUndo: sanitizeReforgeUndo(parsed.reforgeUndo),
       buffs: Array.isArray(parsed.buffs) ? parsed.buffs.filter(b => b && typeof b.expireAt === 'number' && b.expireAt > Date.now()) : [],
@@ -857,6 +1063,17 @@ export class GameStore {
         : { date: todayKey(), counts: {} },
       // v1.42 活动中心。老存档一律没有这个字段 ⇒ 补一份空的（进度从零开始，**绝不因此判死档**）
       activities: sanitizeActivityState(parsed.activities),
+      // v1.54 新手引导 + 第一章剧情。⚠️ 这一条与上面所有字段**方向相反** ——
+      // 别的字段老存档补默认值（从零开始），这一个老存档要补**"已完成"**：
+      // 已经有进度的玩家明天打开游戏，绝不能连看六幕序章再被登记卡住。
+      // 判据（三个都不成立才当新号）见 sanitizeStoryState 的注释。
+      // ⚠️ 它的计算已经提到上面去了（v1.60 迁移要用它判 `finished`），这里只引用，别重算 ——
+      //    同一件事两份计算正是"两处各判一次必然漂"的老毛病。
+      story,
+      // 剧情战斗**不进存档**，读档一律作废重来（见 GameState.storyBattle 的注释）：
+      // 它只活几十秒，净化它要处理敌人数组/双方血量/控制减益三份畸形值，
+      // 而我们能换到的只是"关掉页面再打开能接着打那半场架"。
+      storyBattle: null,
     }
     // 上面 `...parsed` 会把老字段一起带进来，留着只会在存档里堆垃圾（新代码不再读它们）
     delete (out as { pityCommon?: unknown }).pityCommon
@@ -1213,6 +1430,14 @@ export class GameStore {
   /** 远程模式的两条请求共用的前缀（与 authApi/saveApi 同一处口径：带构建前缀）。 */
   private api(path: string): string { return `${import.meta.env.BASE_URL}api${path}` }
 
+  /** 每次玩家意图一个唯一编号，服务端据此保证重放只结算一次。 */
+  private requestId(): string {
+    try {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+    } catch { /* 降级到时间戳 + 随机数 */ }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`
+  }
+
   /** 界面上要用它判断"显示重连中 / 禁用按钮"。**不要**据此做业务判断。 */
   remoteStatus(): { remote: boolean; down: boolean; needLogin: boolean; loaded: boolean } {
     return { remote: this.remote, down: this.remoteDown, needLogin: this.needLogin, loaded: this.srev > 0 }
@@ -1283,10 +1508,10 @@ export class GameStore {
 
       let j: Record<string, unknown>
       try {
-        const r = await apiFetch(this.api('/action'), {
+        const r = await apiFetch(this.api('/game/action'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ op, args, playerId: getRemotePid() }),
+          body: JSON.stringify({ op, args, requestId: this.requestId(), playerId: getRemotePid() }),
         })
         j = await r.json()
       } catch {
@@ -1368,7 +1593,7 @@ export class GameStore {
     let applied = 0
     try {
       const pid = getRemotePid()
-      const r = await apiFetch(this.api(`/state?playerId=${encodeURIComponent(pid)}&since=${this.srev}`))
+      const r = await apiFetch(this.api(`/game/state?playerId=${encodeURIComponent(pid)}&since=${this.srev}`))
       const j = await r.json().catch(() => null)
       if (!j || j.ok !== true) {
         // `need_login`：服务端明确说"这个身份不合法"。**绝不回退到本地算账**（不变量③）——
@@ -1496,6 +1721,17 @@ export class GameStore {
       }
     } else if (this.state.lab.autoLab && !this.state.lab.battle && !this.state.lab.offer) {
       this.startLab()
+    }
+
+    // 剧情战斗（v1.55）。三条线**并行不互斥**：玩家可以一边挂主线、一边爬塔、
+    // 同时点开一段剧情打 —— 这正是"不和主线战斗耦合"要的效果。
+    // 但剧情战斗**不自动续**（没有 autoStory 这种东西）：它是一场戏，打赢就该回剧情。
+    if (this.state.storyBattle) {
+      this.state.storyBattle.roundTimer -= dt
+      while (this.state.storyBattle && this.state.storyBattle.roundTimer <= 0) {
+        this.state.storyBattle.roundTimer += ROUND_SEC
+        this.storyBattleRound()
+      }
     }
 
     const cutoff = Date.now() - 3000
@@ -1657,6 +1893,227 @@ export class GameStore {
     }
     this.state.battle = null
     this.emit()
+  }
+
+  // ── 新手引导 / 第一章剧情（数据在 game/story.ts）─────────────────────────
+  //
+  // 三个写方法都走 `delegate`：本作是服务端权威（SPEC §4.4），
+  // 客户端的写入在下一帧就会被权威态覆盖，不转发等于玩家关掉页面进度就没了。
+
+  /**
+   * 序章翻到第 `to` 幕（1-based）。看完最后一幕传 `PROLOGUE.length + 1`。
+   *
+   * ⚠️ **只前进、不后退**（`v <= st.prologueAct` 直接返回）。这个字段记的是
+   * "**最远看到过第几幕**"，不是"现在停在第几幕" —— 组件里点「上一幕」翻回去看，
+   * 那是**组件自己的视图位置**，不该把进度退回去。否则玩家翻回第 2 幕关掉页面，
+   * 下次进来又从头被拦一次。
+   */
+  setPrologueAct(to: number) {
+    const fwd = this.delegate<void>('storyPrologue', { act: to })
+    if (fwd) return fwd
+    const v = Math.max(1, Math.min(PROLOGUE.length + 1, Math.floor(Number(to)) || 1))
+    if (v <= this.state.story.prologueAct) return
+    this.state.story.prologueAct = v
+    this.save()
+    this.emit()
+  }
+
+  /**
+   * 报上道号 —— 跨过「入门登记」那一步。
+   *
+   * ⚠️ **名字不从这里写**。名字的唯一权威是账号昵称（`nickname.ts` + `POST /nickname`，
+   * v1.53 刚收口），组件在提交时先走那条路，成功后再调这个方法只记一个"他登记过了"。
+   * 这里要是也存一份名字，玩家在群雄榜改名之后，剧情里的称呼就会和榜上对不上。
+   */
+  setEnrolled() {
+    const fwd = this.delegate<void>('storyEnroll', {})
+    if (fwd) return fwd
+    if (this.state.story.enrolled) return
+    this.state.story.enrolled = true
+    this.save()
+    this.emit()
+  }
+
+  /** 手册看过一遍了（纯标记，不发任何东西） */
+  markHandbook() {
+    const fwd = this.delegate<void>('storyHandbook', {})
+    if (fwd) return fwd
+    if (this.state.story.handbook) return
+    this.state.story.handbook = true
+    this.save()
+    this.emit()
+  }
+
+  /**
+   * 领下一个剧情节点。
+   *
+   * ⚠️⚠️ **所有的前置校验都在这里**，不在 UI 上。这个引擎在服务端也跑同一份产物
+   * （`dist-engine/engine.cjs`），所以写在这儿的判断就是**服务端的判断** ——
+   * 光靠 UI 把按钮点灰是挡不住手改 `POST /action` 的，而剧情节点**发铜钱和结晶**，
+   * 那就是一条刷资源的路子。改这个方法之前先想清楚这一点。
+   *
+   * 幂等：重复调用同一个 id 直接返回，不会发两次奖。
+   */
+  claimStoryNode(id: string) {
+    const fwd = this.delegate<void>('storyNode', { id })
+    if (fwd) return fwd
+    const node = CHAPTER1.find(n => n.id === id)
+    if (!node) return                                  // 不认识的 id：静默丢弃
+    const st = this.state.story
+    if (st.done.includes(id)) return                   // 幂等
+    const { locked, ready } = storyNodeState(node, st)
+    if (locked || !ready) return                       // 前置没走完
+    st.done.push(id)
+    this.state.inventory.coin = num(this.state.inventory.coin) + node.reward.coin
+    if (node.reward.crystal > 0) {
+      this.state.inventory.crystal = num(this.state.inventory.crystal) + node.reward.crystal
+    }
+    // 武魂精血 / 保底装备（v1.58，只有序章战斗那一格用得上）。
+    // ⚠️ 装备是**在这里现场生成**的，不是从掉落表里抽 —— 强制引导后面有一步
+    //    「第一次装备」，靠 6% 的随机掉落去凑那一步等于让玩家干等。
+    //    生成走 `rollEquip`（与常规掉落同一个工厂），所以它和打怪掉的那件没有任何区别：
+    //    同样的词条规则、同样能强化/洗练/分解，不是一件特制的"新手道具"。
+    if (node.reward.essence) {
+      this.state.inventory.essence = num(this.state.inventory.essence) + node.reward.essence
+    }
+    let gotEquip = ''
+    if (node.reward.equip) {
+      const it = rollEquip(node.reward.equip.slot, node.reward.equip.quality)
+      this.state.equipBag.push(it)
+      gotEquip = ` · ${it.name}`
+    }
+    this.setNotice(`${node.id}「${node.title}」完成 · 铜钱 +${node.reward.coin}${node.reward.crystal > 0 ? ` · 斗气结晶 +${node.reward.crystal}` : ''}${node.reward.essence ? ` · 武魂精血 +${node.reward.essence}` : ''}${gotEquip}`)
+    // 解禁：走到 STORY_UNLOCK_NODE 就**永久**放开阻断式引导（单向，见 StoryState.finished）
+    if (id === STORY_UNLOCK_NODE) st.finished = true
+    this.save()
+    this.emit()
+  }
+
+  // ── 剧情战斗（v1.55）──────────────────────────────────────────────────
+  //
+  // 与主线完全解耦。**这三个方法都不进 OPS 表**，理由与天梯塔的回合一致：
+  // 战斗回合是**本地演的**（每 0.6 秒一回合，写一次存档要 POST 一次 /action，
+  // 那既不现实也没必要），只有「领这一格的奖励」才走权威通道 —— 也就是
+  // `claimStoryNode`。所以这里能刷到的上限就是"重打一场戏"，一分资源都刷不出来。
+  //
+  // ⚠️ 这与 `startLab` / `labBattleRound` 是**同一套取舍**，不是漏做了转发。
+
+  /**
+   * 开打某一格剧情战斗。
+   *
+   * ⚠️ 前置校验**必须在这里**（虽然不上服务端，但 UI 与服务端跑的是同一份产物，
+   *    而 `claimStoryNode` 那一侧照样会把关：这里放进去、打赢了也领不到奖）。
+   */
+  startStoryBattle(nodeId: string) {
+    const node = CHAPTER1.find(n => n.id === nodeId)
+    // 认不出的 id / 不是战斗格 / 没有 combat 规格：静默丢弃，与 claimStoryNode 一致
+    if (!node || node.kind !== 'battle' || !node.combat) return
+    const st = this.state.story
+    if (st.done.includes(nodeId)) return               // 已经过了，不重开
+    if (node.requires.some(r => !st.done.includes(r))) return  // 前置没走完
+    const fighters = this.activeFighters()
+    if (fighters.length === 0) { this.setNotice('请先编排阵容'); return }
+    const fighterHp: Record<string, number> = {}
+    let atkSum = 0, hpSum = 0, defSum = 0, statted = 0
+    for (const id of fighters) {
+      const s = this.mainFighterStats(id)
+      if (!s) continue
+      fighterHp[id] = s.hp
+      atkSum += s.atk
+      hpSum += s.hp
+      defSum += s.def
+      statted++
+    }
+    // 敌人**按我方阵容重新定标**（v1.55d）。
+    //
+    // 不做这一步的话，`node.combat.power`（2/5/8/14，等价主线第 N 关的怪）在成型阵容面前
+    // 是一刀就没的东西 —— 第一回合 `onWaveClear` 就触发，整屏从出现到消失只有 `ROUND_SEC` 两秒。
+    // 用户 2026-09-22 报的「战斗过程都没有，战斗都没有动画就结束了」就是它。
+    // 两个 `Math.max` 只抬高不压低，所以**新手那一侧的手感分毫未动**，理由见 data.ts。
+    const enemies = enemyUnitsForStory(node.combat)
+    scaleStoryEnemiesForParty(enemies, {
+      atk: atkSum,
+      hp: hpSum,
+      defAvg: statted > 0 ? defSum / statted : 0,
+      count: statted,
+    })
+    this.state.storyBattle = {
+      nodeId,
+      enemies,
+      roundTimer: ROUND_SEC,
+      fighterHp,
+      rounds: 0,
+      fighterDebuff: {},
+    }
+    this.emit()
+  }
+
+  /**
+   * 退出剧情战斗（中途认输 / 打完点「继续剧情」）。
+   *
+   * 退出**不惩罚**：与主线不同，这里不记团灭、不动 `wipeStreak`、
+   * 更不会因为打不过就卡住剧情 —— 剧情战斗是可以无限重来的，它只是一个关。
+   */
+  stopStoryBattle() {
+    if (!this.state.storyBattle) return
+    this.state.storyBattle = null
+    this.emit()
+  }
+
+  private storyAnyAlive(b: StoryBattleState): boolean {
+    return Object.values(b.fighterHp).some(hp => hp > 0)
+  }
+
+  /**
+   * 一个剧情战斗回合。
+   *
+   * ── 为什么属性走 `mainFighterStats` 而不是另开一个 `storyFighterStats` ──
+   * 羁绊算的是"谁站在这套阵容里"，与在哪条线打无关（`bondBonuses` 的注释已经说过这句）。
+   * 剧情战斗用的是**同一套上阵阵容**，所以就该拿同一份数。
+   * 天梯塔另开一份是因为它要叠祝福，剧情没有祝福 —— 为了"看起来对称"再加一个
+   * 逐字相同的别名，只是把 v1.21.4 / v1.29 那两次"同一件事两份实现"的教训再种一遍。
+   */
+  private storyBattleRound() {
+    const b = this.state.storyBattle
+    if (!b) return
+    // ⚠️ 我方全灭后**不清 state，只是不再出回合**，等玩家自己决定重来还是退出。
+    //    这里一开始写成"全灭就 `storyBattle = null`"（照抄主线与塔的做法），
+    //    结果是战斗层在玩家眼前**啪地消失**、人已经站在地图上了 ——
+    //    看起来像界面崩了，而不是"我打输了"。剧情战斗是可以无限重来的，
+    //    它没有"必须自动收场"的理由，所以把决定权留给玩家。
+    //    这个 state 不进存档（见 GameState.storyBattle），刷新页面自然就散了。
+    if (!this.storyAnyAlive(b)) return
+
+    this.fightRound({
+      b,
+      source: 'story',
+      statsOf: id => this.mainFighterStats(id),
+      pierce: 0,
+      dodge: 0,
+      lifesteal: 0,
+      // 剧情战斗没有首领概念（boss 在数据上已经和普通战斗格合并了，见 story.ts 的 NodeKind）。
+      // 传 false 同时影响两件事：击杀飘字不放大、装备掉落按普通怪判定。
+      isBoss: false,
+      waveLabel: () => b.enemies[0]?.name ?? '剧情战斗',
+      // 一波打完 = 这一格过了。**不刷下一波**（与主线/塔的关键区别），
+      // 因为它就是一场戏：打赢了就该结算走人，而不是变成无限刷怪。
+      onWaveClear: () => {
+        this.storyOnWin(b)
+        return false
+      },
+    })
+  }
+
+  /**
+   * 剧情的战斗格打完了。
+   *
+   * ⚠️ **奖励一律不在这里发**，只调 `claimStoryNode(nodeId)` —— 它才是走服务端权威通道的
+   *    那一个（`storyNode` op）。在这里顺手 `coin += ...` 就等于开了一条**纯客户端的刷币路**：
+   *    绕过 /action 的限流与校验，改个本地变量就能刷。这条线不能松。
+   */
+  private storyOnWin(b: StoryBattleState) {
+    this.state.storyBattle = null
+    this.claimStoryNode(b.nodeId)
   }
 
   startBattle() {
@@ -2566,9 +3023,11 @@ export class GameStore {
     const cdef = CHAR_MAP[charId]
     if (!cdef) return { ok: false, why: '没有这名武魂' }
     if (this.state.roster[charId]) return { ok: false, why: `${cdef.name} 已在名录中` }
-    if (isLinkChar(charId) && !linkActive()) {
+    // ⚠️ 判定走 `linkGettable(charId)`，**不是** `isLinkChar(charId) && !linkActive()`：
+    //    后者按"有没有活动在进行"判，第二期开起来时会把第一期已结束的韩立/银月一起放回来。
+    if (!linkGettable(charId)) {
       // 与界面同一句话（linkClosedText 按时段取词：活动前说"已结束"是假话，红线⑩）
-      return { ok: false, why: linkClosedText() }
+      return { ok: false, why: linkClosedText(charId) }
     }
     const need = shardCostOf(cdef)
     if ((this.state.inventory.shard ?? 0) < need) return { ok: false, why: `角色碎片不足（需要 ${need} 枚）` }
@@ -3179,16 +3638,59 @@ export class GameStore {
     return true
   }
 
-  /** 一键分解所有垃圾装备（强化过的会连带退还材料，与单件分解同一条路径） */
-  breakdownJunk(): { count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } | Promise<{ count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number }> {
-    const fwd = this.delegate<{ count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number }>('breakdownJunk', {})
+  /**
+   * 一件背包装备**这次会不会被一键分解吃掉** —— 预览与实际执行共用这一处。
+   *
+   * v1.64（用户：「一键分解装备允许用户自定义分解的装备品质」）：在"垃圾"之上再按品阶收窄。
+   * 两道条件是**与**关系，不是或 —— 勾了「圣阶」也只会分解**没用的**圣阶，
+   * 「换上会变强」的那件照样保留。玩家选的从来只是"范围"，不是"要不要保护"。
+   *
+   * ⚠️ **界面不许自己再写一遍这个判断。** 装备分解不可逆（不退费、也找回不了），
+   *    "弹窗说分解 100 件、实际吃掉 3746 件"是玩家会截图来骂的那种 bug，
+   *    而两份实现只要有一天不同步就会出现它 —— 所以预览(`junkPreview`)与执行(`breakdownJunk`)
+   *    必须调用同一个函数，判据也直接比这两个的返回数。
+   *
+   * `qualities` 缺省 = **不按品阶筛**（老客户端的调用方式，行为与改版前逐字节相同）。
+   * 传了空数组 = 一件都不分解（这是玩家主动取消全部勾选的意思，不是"不限"）。
+   */
+  private isJunkPick(item: EquipItem, qualities?: Rarity[]): boolean {
+    if (qualities && !qualities.includes(item.quality)) return false
+    if (!EQUIP_BREAKDOWN[item.quality]) return false // 品阶无法识别 → 留着
+    return this.isJunkEquip(item)
+  }
+
+  /**
+   * 「一键分解」这一次会吃掉多少件、产出多少。**只读**，不动任何状态 —— 给确认弹窗用。
+   *
+   * 与真正执行的 `breakdownJunk` 共用 `isJunkPick`，所以两个数永远相等；
+   * 判据里那条"预览 == 实际"就是拿这两个方法的返回值直接比的。
+   */
+  junkPreview(qualities?: Rarity[]): { count: number; essence: number; xuanjing: number } {
+    let count = 0, essence = 0, xuanjing = 0
+    for (const item of this.state.equipBag) {
+      if (!this.isJunkPick(item, qualities)) continue
+      const g = EQUIP_BREAKDOWN[item.quality]
+      count++; essence += g.essence; xuanjing += g.xuanjing
+    }
+    return { count, essence, xuanjing }
+  }
+
+  /**
+   * 一键分解所有垃圾装备（强化过的会连带退还材料，与单件分解同一条路径）。
+   *
+   * `qualities` = 玩家在确认框里勾选的品阶（v1.64）。缺省不筛，见 `isJunkPick`。
+   * ⚠️ 远程模式下整个动作（连同这个参数）是发给服务端执行的 —— 所以**服务端的 action 表
+   *    必须能收下 `qualities`**，且**必须先部署服务端再切客户端**：老服务端会把这个参数
+   *    整个丢掉然后照旧全分解，"勾了黄阶却被清空背包"说的就是那个窗口。
+   */
+  breakdownJunk(qualities?: Rarity[]): { count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number } | Promise<{ count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number }> {
+    const fwd = this.delegate<{ count: number; essence: number; xuanjing: number; refundCrystal: number; refundEssence: number }>('breakdownJunk', { qualities })
     if (fwd) return fwd
     let count = 0, essence = 0, xuanjing = 0, refundCrystal = 0, refundEssence = 0
     const keep: EquipItem[] = []
     for (const item of this.state.equipBag) {
+      if (!this.isJunkPick(item, qualities)) { keep.push(item); continue }
       const g = EQUIP_BREAKDOWN[item.quality]
-      if (!g) { keep.push(item); continue } // 品阶无法识别 → 留着
-      if (!this.isJunkEquip(item)) { keep.push(item); continue }
       count++; essence += g.essence; xuanjing += g.xuanjing
       const r = this.refundEnhance(item)
       refundCrystal += r.refundCrystal; refundEssence += r.refundEssence
@@ -3390,62 +3892,455 @@ export interface Guide {
   tab: 'roster' | 'shop' | 'recruit'
 }
 
-// ── 新手三步（v1.32）──────────────────────────────────────────────────────
+// ── 引导：**一条**贯穿全程的步骤表（v1.58）──────────────────────────────
 /**
- * 新玩家开局的三步引导：**先赢一场 → 升到 2 级 → 抽一次**。
+ * 引导的**唯一来源**。用户 2026-09-22：
+ *   「我们要对整个旅程剧情做一个改动，要**无脑式**的引导，而且要融入主线战斗模块，
+ *     把原有的那个新手引导**代替**，全部用**蒙层引导**，用户必须按照步骤一步一步来……
+ *     一步步阻塞引导教玩家怎么开始战斗，然后第一次修炼，第一次装备，装备升级，
+ *     然后活动领取，然后战斗爬塔，融入整个旅程，而且要强制引导，蒙层式点击。」
  *
- * 为什么是这三步：新号打开游戏落在阵容页（全站最复杂的一页），场上没有角色、
- * 也没有战斗在跑——一个挂机游戏的核心承诺（挂机变强）一次都没演示。这三步按
- * 「看到战斗 → 亲手变强一次 → 认识抽卡」排，每一步都有立刻能做的动作。
+ * ── 它取代了什么（两份旧实现，都已删除，别再各自复活）──────────────────
+ *   · `storyGate()` 的四票否决：序章 / 立誓 / 手册 / 第一章 —— 现在**就是**这张表的前三步
+ *     与最后几步，`storyGate` 退化成这张表上的一个投影（服务端还在调它，见下）。
+ *   · `newbieSteps()` 的三步常驻条（战斗 / 修炼 / 招募）：那是一条**不拦人**的进度条，
+ *     玩家可以一直不理它。现在是同一条流水线里的三个**阻塞**步骤。
  *
- * **完成判据全部由现有存档状态推导，不新增存档字段**（存档结构是红线，能不加就不加）：
- * - 第一步 `kills`（战斗页累加，新号从 0 开始）
- * - 第二步 任一角色 `level >= 2`（打坐修炼 / 战斗结算都会涨）
- * - 第三步 见下方 `pulled`，三条痕迹取并集
+ * ── 三条设计约束，改这张表之前先读 ──────────────────────────────────────
+ *   ① **完成判据全部从既有存档状态推导，不新增存档字段**。存档结构是红线，
+ *      而"这一步做没做"几乎都能从别处看出来（打过架有 `kills`、修炼过有 `level`、
+ *      穿过装备看 `roster[].equip`、强化过看 `item.lv`、领过活动看 `activities.claimed`、
+ *      爬过塔看 `lab.highestFloor`）。加一个 `onboardStep: number` 字段看着省事，
+ *      代价是它**一定会和真实进度脱钩**（玩家在别处把这件做了，序号还停在原地）。
+ *   ② **顺序即体验顺序，不能换**。如"第一次装备"必须排在"战斗"之后 ——
+ *      这条在 v1.60 之前是靠"序章战斗发一件保底"满足的；用户 2026-09-22 把剧情从引导链路里
+ *      摘掉之后（「不要自己单独做个旅程模块的战斗」），保底改由 `freshState()` **开局就发**
+ *      （见那里的注释：数值一个字没改，只是提前到手）。顺序本身仍然是硬的：
+ *      后面的"穿戴 / 强化"两步全建立在"背包里有那件装备"之上。
+ *   ③ **爬塔排在最后，且必须排在解禁点（第一章 1-4）**之前。不是因为叙事，是因为
+ *      `story.finished` 一置位，`onboardCurrent` 就**永久**返回 null（见下）。
+ *      把爬塔排到 1-4 后面的话，这张表根本轮不到它就被整个关掉了。
  *
- * ️ 第三步的判据要能覆盖**抽卡的每一种结局**，否则玩家会遇到"我抽了但它不勾"：
- * 抽到新角色 ⇒ roster 变长；抽到重复 ⇒ 低阶给武魂精血、准圣/圣给碎片（见 recruit 的分支，
- * 两者必有其一）。再加上三层保底计数——只要抽过一次，至少有一个计数器非 0。
- * 三条并集下来不存在"抽了但判不出"的结局。
- *
- * 三步全部完成即返回 null，整条收起，不再打扰。
+ * ── `finished` 一票否决 ────────────────────────────────────────────────
+ * 玩家一旦走到解禁点（1-4），这张表**永久**返回 null。老玩家（`sanitizeStoryState`
+ * 给他们置了 finished）因此一根汗毛都不会被碰到 —— 这是"只对新号"那条口径的落点。
  */
-export interface NewbieStep {
-  key: 'battle' | 'train' | 'recruit'
-  /** 生图素材键。三步各自的形象：开战借塔内祝福的剑、修炼花的是斗气结晶、招募花的是缘分丹 */
-  spr: string
-  /** 这一步要玩家做什么（动词开头，一句话） */
-  text: string
-  /** 点「去做」跳到哪一页 */
-  tab: 'combat' | 'roster' | 'recruit'
-  done: boolean
+export interface OnboardStep {
+  key: string
   /**
-   * 现在能不能立刻做。false 不是错误态，只是"条件还没到"——
-   * 界面这时显示 `hint` 里的实时进度（如「斗气结晶 12/20」），而不是一个点了没反应的按钮。
-   * 新号开局结晶为 0，第一级要 20 点、挂机 1.2/秒 ≈ 17 秒，这段等待与第一步的
-   * 首场战斗是并行跑的，所以进度条比倒计时文案更贴合玩家实际感受。
+   * `screen` = 整屏内容（序章 / 立誓 / 手册），由 `StoryGate` 渲染；
+   * `do` = **页面上的一件事**，由蒙层 `Onboarding` 挖洞高亮出来，玩家只能点它。
+   */
+  kind: 'screen' | 'do'
+  /** `screen` 步骤渲染哪一屏 */
+  screen?: StoryGate
+  /**
+   * `do` 步骤：去哪个页签（与 App.tsx 的 tab id 一致）
+   */
+  tab?: string
+  /**
+   * `do` 步骤：跳过去时**顺带选中**哪个东西（走 App 现成的 `navigate(tab, focus)`）。
+   *
+   * 为什么需要这个：`RosterView` 的右栏在没有选中角色时**根本不渲染**（`selected` 初始为 null），
+   * "打坐修炼"那一行就不在屏幕上 —— 蒙层挖不到洞，玩家被卡在一句"点它"上而它不存在。
+   * 这不是蒙层的毛病，是那一页在等一个意图；`navigate` 的第二参数本来就是为这件事准备的。
+   */
+  focus?: string
+  /**
+   * `do` 步骤：高亮哪个元素。**按顺序找，页面上第一个存在的胜出** ——
+   * 最典型的用法是把"打开之后的那个按钮"排在前面、"入口"排在后面：
+   * 剧情阅读器开着时高亮底栏主按钮，没开时高亮地图上那一格。
+   * 全都找不到时蒙层会退回高亮**页签按钮**（`[data-tab=…]`），把玩家先送到那一页。
+   */
+  anchors: string[]
+  /** 气泡标题 */
+  title: string
+  /** 气泡正文：一句人话，**说清"点哪里"**，不解释系统 */
+  body: string
+  /**
+   * **这一步不用点任何东西，看着它跑完就行**（蒙层收成一块浅压暗 + 一句说明，不挖洞）。
+   *
+   * 唯一的用户本来是**剧情战斗**那一格；v1.60 把剧情从引导链路里摘掉之后，
+   * **当前这张表里没有任何一步用它** —— 保留是因为"看着它跑完"这件事本身还会回来
+   * （任何一步的 `done` 需要等一段自动过程时就是它），删了下次还得重写一遍下面这段坑。
+   * 老用法（若哪天真要接回剧情战斗）：按了「开战」之后那几秒是**自动打的**，要到打赢才 `done`。
+   * 这期间如果不特殊处理，蒙层会拿这一格的第二个锚点（地图上那一格）去挖洞 ——
+   * 而战斗层正盖在它上面，挖出来的洞里是战斗画面、点下去打到的是战斗层。
+   * 玩家看到的是一块"说这儿能点、点了没反应"的洞。
+   *
+   * ⚠️ **它只在"还有人站着"的时候为真**（见 `onboardSteps` 里那一格）。全员脱力之后战斗层
+   *    停在原地不回退（见 `storyBattleRound`），那时必须把洞还给「再来一次」——
+   *    否则玩家打输了、战斗卡住、蒙层又挡着那颗按钮，**就出不去了**。
+   */
+  watch?: boolean
+  /**
+   * **这一步已经开始跑了，结果还没出来** —— 蒙层收成一块浅压暗 + 一句说明，不挖洞。
+   *
+   * 与 `watch` 的分工：`watch` 认的是**剧情战斗那一层**（`[data-story-battle]` 在不在），
+   * 而这个是**任何一步**都可能有的"它自己在跑"，由 `onboardSteps` 从存档状态现算。
+   *
+   * ⚠️⚠️ 为什么必须有它 —— 2026-09-22 真浏览器实测出来的死锁（用户原话
+   *    「第 4 步开始战斗有点问题，**点几下都没反应**」）：
+   *    `battle` 这一步的完成判据是"打完一关"（`kills >= 1`），而挂机战斗要 1~2 秒
+   *    才打出第一个人头。**这 1~2 秒里蒙层还赖在那颗按钮上**，而它此刻写着
+   *    「自动出战中（点击停止）」⇒ 玩家以为"点了没反应"，手再快一点，第二下就落在
+   *    **同一颗按钮**上，**把挂机关了** ⇒ `kills` 永远到不了 1 ⇒ 新号**永久卡在第 4 步**。
+   *    实测日志：点两下之后 `autoBattle: true → false`，蒙层步仍是 `battle`。
+   *
+   * 结论（以后复用）：**判据一旦要"等一个过程"，就必须同时把蒙层从"挖洞"切到
+   *    "看着它跑"** —— 否则那颗按钮在等待期间仍然可点，而它此刻点下去是反效果。
+   */
+  running?: boolean
+  /**
+   * `running` 为真时气泡里那句话。不填就沿用 `body`。
+   *
+   * ⚠️ 别偷懒照抄 `body`："点它"和"等它跑完"指的不是同一件事 ——
+   *    照抄等于继续叫玩家去点那颗**此刻点下去就是反效果**的按钮。
+   */
+  runningBody?: string
+  done: boolean
+}
+
+/** 任意一名角色的任意一个槽位上有装备 */
+function anyEquipped(state: GameState): boolean {
+  return Object.values(state.roster).some(e => Object.values(e.equip ?? {}).some(Boolean))
+}
+
+/** 任意一件**已穿戴**的装备被强化过（`lv >= 1`）—— 只认身上那几件，背包里强化的不算 */
+function anyEquippedEnhanced(state: GameState): boolean {
+  return Object.values(state.roster).some(e =>
+    Object.values(e.equip ?? {}).some(it => (it?.lv ?? 0) >= 1))
+}
+
+/**
+ * 整张表，按顺序。只读 `state`，不写 —— 与 `storyNodes` 同一个路数。
+ *
+ * ⚠️ v1.60：这张表**只由下面这几条手写步骤组成**，不再掺剧情节点。
+ *    用户 2026-09-22 原话：「**旅程也不要了，就只剩蒙层引导**」⇒ 第一章那几格
+ *    （1-1 ~ 1-4）**不再是引导步骤**，它们回到普通页签内容里，玩家想去再去。
+ *    `story.finished` 仍然是一票否决的解禁点，但它的作用从"关掉剧情那几格"
+ *    变成"**整张表到此为止**"（见 `onboardCurrent`）。
+ */
+export function onboardSteps(state: GameState): OnboardStep[] {
+  const st = storyOf(state)
+
+  const steps: OnboardStep[] = [
+    { key: 'prologue', kind: 'screen', screen: 'prologue', anchors: [],
+      title: '序章', body: '', done: st.prologueAct > PROLOGUE.length },
+    { key: 'oath', kind: 'screen', screen: 'enroll', anchors: [],
+      title: '立誓', body: '', done: st.enrolled },
+    { key: 'handbook', kind: 'screen', screen: 'handbook', anchors: [],
+      title: '修行手册', body: '', done: st.handbook },
+
+    // ① 战斗：**挂机主循环**，也是玩家被教的第一件事。
+    //    ⚠️ v1.60 起这里**不再经过剧情那一格**。用户 2026-09-22 原话：
+    //       「引导去 tab 里面的战斗模块，**不要自己单独做个旅程模块的战斗**」
+    //       ⇒ 教的是**战斗页那颗按钮**（「开启自动出战」），与剧情里那场"看的"架无关。
+    { key: 'battle', kind: 'do', tab: 'combat',
+      anchors: ['[data-onb="battle"]'],
+      title: '让战斗自己跑起来',
+      body: '点一下开战。之后它会一直替你打，你关掉页面也在打。',
+      // ⚠️ 一点下去就必须把蒙层切成"看着它跑"：这颗按钮此刻写着「自动出战中（点击停止）」，
+      //    再点一下就是**关掉挂机** —— 玩家"以为没反应"的那第二下正好落在这儿（见 `running` 的注释）。
+      running: state.autoBattle && state.kills < 1,
+      runningBody: '看着它打完这一关，马上就好。这期间别碰那颗按钮 —— 再点一下是「停止出战」。',
+      done: state.kills >= 1 },
+
+    // ② 第一次修炼
+    //    ⚠️ `focus` 不能省：阵容页右栏没选中角色时整块不渲染（见 `OnboardStep.focus`）。
+    //       给的是**队伍里第一个**（开局那四个人之一），他一定在名录里。
+    { key: 'train', kind: 'do', tab: 'roster',
+      focus: state.team.front.find(Boolean) ?? Object.keys(state.roster)[0],
+      anchors: ['[data-onb="train"]'],
+      title: '第一次修炼',
+      body: '给一名角色打坐，把等级提上去。',
+      done: Object.values(state.roster).some(e => e.level >= 2) },
+
+    // ③ 第一次装备（`freshState()` 开局发的那件就在背包里）
+    { key: 'equip', kind: 'do', tab: 'equipment',
+      anchors: ['[data-onb="equip"]', '[data-onb="auto-equip"]'],
+      title: '穿上第一件装备',
+      body: '点「穿戴」，它就会挂到这名角色身上。',
+      done: anyEquipped(state) },
+
+    // ④ 装备强化：**两步**（先点开那件装备 → 再点强化）。
+    //    锚点顺序就是这两步的先后：详情浮层开着时 `enhance` 在、没开时只有槽位图标在。
+    { key: 'enhance', kind: 'do', tab: 'equipment',
+      anchors: ['[data-onb="enhance"]', '[data-onb="open-item"]'],
+      title: '把装备强化一级',
+      // v1.61：用户「提升装备的意义简短讲」⇒ 补一句**为什么**，但只说一句，
+      // 不解释系统（浓度对齐这张表其余各步的 body）。
+      body: '点开这件装备，再按「强化 +1」。强化把装备词条的加成往上提，是涨战力最直接的一条路。',
+      done: anyEquippedEnhanced(state) },
+
+    // ⑤ 活动领奖。⚠️ 见下面 `activityNothingToClaim`：**没奖可领时这一步自动让路** ——
+    //    活动是运营配置，配置没下发 / 全是未达标的时候，硬要玩家点一个点不动的按钮就是死锁。
+    //    ⚠️ 锚点复用领奖按钮**本来就有的** `data-act-claim`（活动页判据早就挂在那儿），
+    //       不再加一个 `data-onb` —— 同一个按钮两个钩子，改了文案没改另一个就该出事。
+    //       按钮不可领时是 `disabled`，蒙层挑目标时会跳过禁用元素（见 Onboarding 的 picker）。
+    { key: 'activity', kind: 'do', tab: 'activity',
+      anchors: ['[data-act-claim]'],
+      title: '把能领的奖励领了',
+      body: '活动里的奖励过期不补，能领就领掉。',
+      done: state.activities.claimed !== undefined && Object.keys(state.activities.claimed).length > 0
+        || activityNothingToClaim() },
+
+    // ⑥ 爬塔（放在最后：它是唯一一个"会自己往上打很久"的，收尾用）
+    //
+    // ⚠️ v1.61：`done` 收窄成**真的打完了一层**。用户 2026-09-22 原话：
+    //    「天梯塔也是可以**等打完一关再跳下一步**」。
+    //    原来那个 `autoLab || !!battle` 是**一点就过** —— 玩家刚点下「开始爬塔」，
+    //    蒙层就跳走了，那一课等于没上（与 `battle` 那步原来"没打完就等着"是同一类毛病，
+    //    只是方向相反：那边等太久，这边不等）。
+    // ⚠️ 收窄带来一个新的死锁，必须同时兜住：爬塔战败时 `autoLab` **不会自己关**
+    //    （只有玩家主动 `retreatLab` 才置 false），tick 会一直重开下一场 ⇒
+    //    "打不过第 1 层"的新号会永远停在 `battle: null / highestFloor: 0 / autoLab: true`，
+    //    而蒙层又挡着他去点撤退。这一条由**蒙层那边的"跑太久就永久让路"**兜
+    //    （见 `Onboarding` 的 `RUNNING_GIVEUP_MS`）：它跨本地/远程两种模式一致
+    //    （不依赖引擎实例的内存态，远程模式下客户端那个实例根本收不到战败事件），
+    //    不用新增存档字段，也不会把玩家关死。
+    { key: 'lab', kind: 'do', tab: 'lab',
+      anchors: ['[data-onb="lab-start"]'],
+      title: '去爬天梯塔',
+      body: '点「开始爬塔」，它会一层层往上打。',
+      running: (state.lab.autoLab || !!state.lab.battle) && state.lab.highestFloor < 1,
+      runningBody: '等它打完第一层，它会自己往上走。这期间别碰那颗按钮 —— 再点一下是「停止爬塔」。',
+      done: state.lab.highestFloor >= 1 },
+  ]
+  return steps
+}
+
+/**
+ * 活动那一步该不该**自动让路**。
+ *
+ * 它是这张表里唯一一步"能不能做取决于**运营配置**"的：活动清单是服务端下发的，
+ * 而"有没有可领的"取决于当下有没有配签到类活动、任务类达标没有。
+ * 强制引导里放一个**玩家无论怎么点都过不去**的步骤，等于把新号关在蒙层里出不来 ——
+ * 比"少教一件事"严重得多。
+ *
+ * 判据只看**可领数**（`claimableCount`，与页签上那个小红点同源）：
+ * 清单还没拉回来 / 一条能领的都没有 ⇒ 这一步直接算过。
+ * ⚠️ 已经领过的不算"没事可做"的判据 —— 领过本身就是 `done` 的另一半。
+ *
+ * ⚠️ **不收 `state`**：答案只取决于"这一刻有没有奖可领"，而那个数在引擎实例上
+ *    （`remoteActivities` 是内存态，存档里没有它）。收一个用不到的 `state` 进来，
+ *    只会让下一个读这段的人以为答案和存档有关。
+ */
+function activityNothingToClaim(): boolean {
+  try { return game.claimableCount() === 0 } catch { return true }
+}
+
+/** 当前该做的那一步（第一个没完成的）。全部走完 / 已解禁 ⇒ null */
+export function onboardCurrent(state: GameState): OnboardStep | null {
+  const st = storyOf(state)
+  // 一票否决：走过解禁点的人**永久**放行，哪怕存档被手改成"没走完"的形状
+  if (st.finished) return null
+  return onboardSteps(state).find(s => !s.done) ?? null
+}
+
+
+// ─── 新手引导 / 第一章剧情：只读选择器 ───────────────────────────────────
+//
+// 这一组全部是**纯函数**（只读 state，不写），和 `onboardSteps` 同一个路数：
+// 组件不许自己判"这个节点能不能打"，一律来这里问 —— 判据写两份必然漂，
+// 而剧情卡在"点了没反应"是最难排查的一类 bug（案例里那个"姓名不填就没反应"
+// 是**故意**的，我们的必须是**唯一一处**故意的）。
+
+/** 现在必须挡住玩家的那一道门。`null` = 不挡，玩家自由活动。 */
+export type StoryGate = 'prologue' | 'enroll' | 'handbook' | 'chapter'
+
+/**
+ * 现在有没有**一整屏内容**要放（序章 / 立誓 / 手册）。`null` = 没有，自由活动。
+ *
+ * ── v1.58 起它只是 `onboardSteps` 的一个投影 ────────────────────────────
+ * 以前这道门自己判四票（序章 / 立誓 / 手册 / 第一章，见 v1.55d 的注释），
+ * 而"第一章那一票"与 `NewbiePath` 那条常驻条是**两套并存**的引导 ——
+ * 用户 2026-09-22 要求把它们收成一条蒙层流水线（原话见 `OnboardStep`），
+ * 于是判断只剩一处：**当前那一步是不是 `kind: 'screen'`**。
+ *
+ * ⚠️ **`finished` 一票否决仍然成立**，只是搬进了 `onboardCurrent`：玩家一旦过了解禁点，
+ *    整张表永久返回 null，哪怕存档被手改回"没走完"的形状。
+ *    ⚠️ 解禁点仍是 `claimStoryNode('1-4')` 置位的 `finished` —— 它是**服务端权威通道**
+ *    上唯一那个"引导结束"的写入口（见 GameState.story 的注释），别在客户端另加一个。
+ */
+export function storyGate(state: GameState): StoryGate | null {
+  // v1.58：**这张门不再自己判**，它退化成了引导步骤表的一个投影 ——
+  // "现在有没有一整屏内容要放" = 当前那一步是不是 `kind: 'screen'`。
+  //
+  // ⚠️ 名字与返回值都**保持原样**：服务端在用它（`server.js` 的 `engStory.gate`，
+  //    军师要拿它说"你还在新手引导里、先去把剧情过了"），改签名会让那条链路静默失效
+  //    —— 而 server.js 每句引擎 require 都裹着 try/catch，失效的表现是**接口照常 200、
+  //    只是问什么都答不到点上**（红线 150：这类"沉默的能力缺失"是本项目最难查的一种）。
+  const cur = onboardCurrent(state)
+  return cur && cur.kind === 'screen' ? (cur.screen ?? null) : null
+}
+
+export interface StoryNodeView extends StoryNode {
+  /** 玩家已经领过这个节点 */
+  done: boolean
+  /** 前置没走完 ⇒ 卡片上显示「待开放」，点不进去 */
+  locked: boolean
+  /**
+   * 条件已满足、**现在就能打/能读** —— 等同于「前置都做完了」。
+   *
+   * ⚠️ 对话和战斗**在这一点上完全一样**，没有战力门槛。以前 `auto`/`boss` 类多一条
+   *    "主线要打到第 N 关"，那条已在 v1.55 拆掉（理由见 `storyNodeState`）。
+   *    所以 `ready === !locked`，留着 `ready` 这个字段是因为 UI 上它和 `locked`
+   *    是两个不同的空状态（"待开放" vs "现在可做"），合并会让组件那边的判断变得难读。
    */
   ready: boolean
+}
+
+/** 节点的开放判定 —— **引擎与 UI 共用这一处**，服务端校验时走的也是它 */
+function storyNodeState(node: StoryNode, st: StoryState): { done: boolean; locked: boolean; ready: boolean } {
+  const done = st.done.includes(node.id)
+  // 前置：`requires` 里有一个没做完，就是「待开放」。空数组 = 无条件开放
+  const locked = node.requires.some(r => !st.done.includes(r))
+  // ⚠️ 这里**曾经有一条主线关卡门槛**（`highestStage > node.stage`），v1.55 拆掉了。
+  //
+  // 用户 2026-09-22：「剧情的战斗不和主线战斗耦合」。那条门槛是耦合最硬的一处 ——
+  // 它把"剧情能推到哪"直接绑在"主线打到第几关"上，于是：
+  //   · 把主线推到 60 关的人回来打第一幕，打的是 60 关数值的敌人 ——
+  //     而这一幕的戏是"萧炎还是个三段的废物、被族人按在地上打"，数值和台词对不上；
+  //   · 卡在第 3 关的人**永远做不完第一章**，而剧情恰恰是那批人最该看的东西。
+  // 现在剧情只认 `requires`（前一格做没做），战斗强度由 `node.combat.power` 自己定，
+  // 与玩家的主线进度无关。代价是"练度不够会打不过" —— 那正是剧情战斗该有的样子。
+  return { done, locked, ready: !locked }
+}
+
+export function storyNodes(state: GameState): StoryNodeView[] {
+  return CHAPTER1.map(n => ({ ...n, ...storyNodeState(n, storyOf(state)) }))
+}
+
+/**
+ * 取这份状态的剧情进度，**兜底一份全新的**。
+ *
+ * 为什么需要兜底：`state.story` 只可能从 `freshState()` / `migrate()` 两条路进来，两条都给了值，
+ * 所以正常运行时它一定在。但**服务端宿主、离线脚本、旧版本写下的本机缓存**都可能塞进来一个
+ * 没有这个字段的对象（2026-09-18 那次 `/save` 兼容期就是这么翻车的）。
+ * 剧情读不到时崩整个页面，是最不值得的一种崩法 —— 兜底成"从头开始"顶多多看一遍序章。
+ */
+function storyOf(state: GameState): StoryState {
+  return state.story ?? freshStoryState()
+}
+
+/** 当前该做的那个节点：第一个「前置完成但还没领」的。全领完了返回 null */
+export function storyCurrent(state: GameState): StoryNodeView | null {
+  return storyNodes(state).find(n => n.ready && !n.done) ?? null
+}
+
+export function storyProgress(state: GameState): { done: number; total: number } {
+  const total = CHAPTER1.length
+  const set = new Set(storyOf(state).done)
+  return { done: CHAPTER1.filter(n => set.has(n.id)).length, total }
+}
+
+/** 第一章的四幕（起承转合）。章节地图按它分组渲染 */
+export function storyActs(): StoryAct[] { return CHAPTER1_ACTS }
+
+export interface StoryActView extends StoryAct {
+  /** 这一幕有几格 */
+  total: number
+  /** 做完了几格 */
+  done: number
+  /** 这一幕整个做完了 */
+  cleared: boolean
+  /** 现在该做的就是这一幕的（UI 上高亮那一组，其余压暗） */
+  active: boolean
+}
+
+/**
+ * 分幕进度 —— 章节地图的分组渲染**只认这一处**。
+ *
+ * 为什么不让组件自己 `filter(n => n.act === a.no)`：那样"某一幕是空的"
+ * （删节点之后很容易出现）会被渲染成一个空标题条，而组件自己没有依据判断
+ * "这一幕该不该显示" —— 只有把 total 一起算出来，那一幕才藏得掉。
+ */
+export function storyActViews(state: GameState): StoryActView[] {
+  const nodes = storyNodes(state)
+  const cur = nodes.find(n => n.ready && !n.done)
+  return CHAPTER1_ACTS.map(a => {
+    const mine = nodes.filter(n => n.act === a.no)
+    const done = mine.filter(n => n.done).length
+    return {
+      ...a,
+      total: mine.length,
+      done,
+      cleared: mine.length > 0 && done === mine.length,
+      active: cur !== undefined && cur.act === a.no,
+    }
+  })
+}
+
+/** 进行中的剧情战斗（没有则 null）。UI 据此决定要不要显示战斗层 */
+export function storyBattleOf(state: GameState): StoryBattleState | null {
+  return state.storyBattle ?? null
+}
+
+/** 序章全部幕（组件按 `story.prologueAct` 取当前那一幕） */
+export function prologueActs(): PrologueAct[] { return PROLOGUE }
+
+/**
+ * 手册五步。**带完成判定**，判定**全部转问 `onboardSteps`**。
+ *
+ * ⚠️ 别在这儿自己再数一遍（"看 registered / 看阵容坐了几个人"）：手册是引导路线的
+ *    **目录**，它和后面的路线是同一件事的两张皮 —— 各判各的，一定会漂，
+ *    而漂出来的现象是"手册上打着勾、下一页的蒙层还拦着你不放"，最难解释的一种。
+ *
+ * 落点靠 `HANDBOOK[i]` 与 `HANDBOOK_KEYS[i]` **同序**对应（story.ts 那边有注释盯着）。
+ * 判据取不到（这一步不在当前表里，例如老玩家 `finished` 之后表整体返回 null）
+ * ⇒ **算完成**：手册只对新号展示，老号那几页不该挂着红点。
+ */
+const HANDBOOK_KEYS = ['oath', 'node:0-1', 'battle', 'train', 'equip'] as const
+
+export function handbookSteps(state: GameState): (HandbookStep & { done: boolean })[] {
+  const byKey = new Map(onboardSteps(state).map(s => [s.key, s.done]))
+  return HANDBOOK.map((h, i) => ({ ...h, done: byKey.get(HANDBOOK_KEYS[i]) ?? true }))
+}
+
+/**
+ * 一段剧本，`{name}` 已替换。名字取不到就回落到「你」——台词里空着比写错强。
+ *
+ * 签名里**不带 state**：剧本是纯数据（story.ts 的 SCRIPTS），跟玩家进度无关。
+ * 带个 state 进来只会让调用方以为"台词会随进度变"，那是另一套设计，这里没有。
+ */
+export function storyScript(nodeId: string, playerName: string): ScriptLine[] {
+  const lines = SCRIPTS[nodeId]
+  if (!lines) return []
+  const nm = playerName.trim() || '你'
+  return lines.map(l => ({ ...l, who: l.who.replace(/\{name\}/g, nm), text: l.text.replace(/\{name\}/g, nm) }))
+}
+
+/** 这个节点有没有剧本（`story` 类节点才有）。给组件判断"点进去是读对话还是去打架" */
+export function hasScript(nodeId: string): boolean {
+  return (SCRIPTS[nodeId]?.length ?? 0) > 0
+}
+
+/** 解禁点（组件要拿它做"引导将在这一格结束"的提示） */
+export function storyUnlockNode(): string { return STORY_UNLOCK_NODE }
+
+export interface NewbieStep {
+  key: 'battle' | 'train' | 'recruit'
+  spr: string
+  text: string
+  tab: 'combat' | 'roster' | 'recruit'
+  done: boolean
+  ready: boolean
   hint?: string
-  /** 就绪时按钮上的文案 */
   action: string
-  /** 跳到 roster 时预选哪名角色（第二步用：刚上阵那位，刚打完第一场接着养他顺理成章） */
   focus?: string
 }
 
 export function newbieSteps(state: GameState): NewbieStep[] | null {
   const battleDone = state.kills >= 1
-  const trainDone = Object.values(state.roster).some(e => e.level >= 2)
-  const pulled =
-    Object.keys(state.roster).length > STARTER_IDS.length ||
-    (state.inventory.essence ?? 0) > 0 ||
-    (state.inventory.shard ?? 0) > 0 ||
-    state.pityTian > 0 || state.pityQuasi > 0 || state.pitySheng > 0
+  const trainDone = Object.values(state.roster).some(entry => entry.level >= 2)
+  const pulled = Object.keys(state.roster).length > STARTER_IDS.length
+    || (state.inventory.essence ?? 0) > 0
+    || (state.inventory.shard ?? 0) > 0
+    || state.pityTian > 0 || state.pityQuasi > 0 || state.pitySheng > 0
 
   if (battleDone && trainDone && pulled) return null
 
-  // 第二步的样板角色：优先取阵上第一个（前排优先）。取不到就退回名录第一人，
-  // 保证 roster 非空时一定给得出一个可修炼的对象——引导不能指到一个空面板上。
   const focus = state.team.front.find(Boolean) ?? state.team.back.find(Boolean) ?? Object.keys(state.roster)[0]
   const entry = focus ? state.roster[focus] : undefined
   const crystal = Math.floor(state.inventory.crystal ?? 0)
@@ -3455,23 +4350,19 @@ export function newbieSteps(state: GameState): NewbieStep[] | null {
   return [
     {
       key: 'battle', spr: 'blessings/sword', tab: 'combat',
-      text: '点一下开战，先赢下一场',
-      done: battleDone, ready: true,
+      text: '点一下开战，先赢下一场', done: battleDone, ready: true,
       action: state.autoBattle ? '自动出战中…' : '开启自动出战',
     },
     {
       key: 'train', spr: 'icons/crystal', tab: 'roster',
-      text: '用斗气结晶给一名角色打坐修炼，升到 2 级',
-      done: trainDone,
-      ready: !!entry && crystal >= need,
+      text: '用斗气结晶给一名角色打坐修炼，升到 2 级', done: trainDone,
+      ready: Boolean(entry) && crystal >= need,
       hint: entry && crystal < need ? `斗气结晶 ${crystal}/${need} · 挂机自动累积` : undefined,
-      action: entry ? `去给${CHAR_MAP[focus]?.name ?? '他'}修炼` : '去阵容页',
-      focus,
+      action: entry ? `去给${CHAR_MAP[focus]?.name ?? '他'}修炼` : '去阵容页', focus,
     },
     {
       key: 'recruit', spr: 'icons/yuanfen', tab: 'recruit',
-      text: '去招募抽一次，看能遇到谁',
-      done: pulled,
+      text: '去招募抽一次，看能遇到谁', done: pulled,
       ready: dan >= 1,
       hint: dan < 1 ? `缘分丹 ${dan}/1 · 每 5 关首领首通给 1 颗` : undefined,
       action: dan >= 10 ? '去招募（十连必出天阶）' : '去招募',
@@ -3479,14 +4370,8 @@ export function newbieSteps(state: GameState): NewbieStep[] | null {
   ]
 }
 
-/**
- * 当前该做的那一步(第一个没完成的),三步走完返回 null。
- *
- * 引导条与各页面上的**呼吸灯高亮**共用这一处判断 —— 呼吸灯只该亮在同一个按钮上,
- * 两处各判一次必然漂(这正是 v1.21.4/1.29 那类"同一件事两份实现"的老坑)。
- */
 export function newbieCurrent(state: GameState): NewbieStep | null {
-  return newbieSteps(state)?.find(s => !s.done) ?? null
+  return newbieSteps(state)?.find(step => !step.done) ?? null
 }
 
 export function nextGuides(state: GameState): Guide[] {

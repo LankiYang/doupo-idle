@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Swords } from 'lucide-react'
-import { useGame, game, charLabel, rarityInfo, itemLabel, newbieCurrent, combatPower, fmtNum, TEAM_FRONT_SIZE, TEAM_BACK_SIZE, type TeamSlotPos, type CombatEffect } from '../game/engine'
+import { useGame, game, charLabel, rarityInfo, itemLabel, onboardCurrent, combatPower, fmtNum, TEAM_FRONT_SIZE, TEAM_BACK_SIZE, type TeamSlotPos, type CombatEffect } from '../game/engine'
 import { itemSprite } from '../game/icons'
 import Ico from './Ico'
 import { portraitFor } from '../game/portraits'
@@ -409,7 +409,7 @@ function BondPanel() {
                   {b.faction.name}
                 </span>
                 <span className="text-[#a89478]">
-                  {b.count} 人{b.fromWild > 0 ? `（含 ${b.fromWild} 名凡人）` : ''}
+                  {b.count} 人{b.fromWild > 0 && bonds.wildcardFrom ? `（含 ${b.fromWild} 名${FACTIONS[bonds.wildcardFrom].name}）` : ''}
                   {b.tier ? ` · 已激活 ${b.tier.count} 人档` : ''}
                 </span>
               </div>
@@ -423,13 +423,24 @@ function BondPanel() {
           )
         })}
       </div>
-      {/* 癞子生效时把"补给了谁"说出口。玩家上阵凡人后看到的是一份凭空变大的档位，
-          不解释就等于让他以为界面算错了（而这个机制在别处没有任何提示）。 */}
-      {bonds.wildcardHost && (
-        <div className="mt-2 text-[11px] leading-relaxed text-[#5eead4]">
-          凡人修仙：上阵的凡人正替
+      {/* 癞子生效时把"补给了谁"说出口。玩家上阵凡人/燕云后看到的是一份凭空变大的档位，
+          不解释就等于让他以为界面算错了（而这个机制在别处没有任何提示）。
+          v1.63 起癞子有两个（凡人、燕云），所以**补位者的名字要从 wildcardFrom 取**，
+          不能再写死"凡人" —— 这一句同时承担"两边不会叠加"的说明义务：
+          玩家把燕云和凡人一起上阵时，会看到其中一个明明在场却没补位，不解释就是个 bug。 */}
+      {bonds.wildcardHost && bonds.wildcardFrom && (
+        <div data-wildcard-note className="mt-2 text-[11px] leading-relaxed"
+          style={{ color: FACTIONS[bonds.wildcardFrom].color }}>
+          {FACTIONS[bonds.wildcardFrom].name}：上阵的{FACTIONS[bonds.wildcardFrom].name}成员正替
           <span className="text-[#e8dcc8]">{FACTIONS[bonds.wildcardHost].name}</span>
-          补人数（补给人最多的那个阵营）。凡人自己那档按实际人数算。
+          补人数（补给人最多的那个阵营），它自己那一档按实际人数算。
+          {bonds.wildcardIdle && (
+            <span className="text-[#a89478]">
+              {' '}队的{FACTIONS[bonds.wildcardIdle].name}这次没有补位 —— 燕云与凡人同时在场时
+              <span className="text-[#e8dcc8]">只有一个能补</span>
+              ，由人数多的那一边来（人数相同则凡人优先）。
+            </span>
+          )}
         </div>
       )}
       {total.length > 0 && (
@@ -544,8 +555,9 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
   const cdef = charLabel(id)
   const entry = state.roster[id]
   if (!cdef || !entry) return null
-  // 新手之路第 2 步指向的就是这个按钮：呼吸灯亮在这里（引导条自己不再亮）
-  const nbTrain = newbieCurrent(state)?.key === 'train'
+  // 引导第③件事（第一次修炼）指向的就是这个按钮：呼吸灯亮在这里。
+  // ⚠️ 判据只有 `onboardCurrent` 一处（与 CombatView 同一条口径）。
+  const nbTrain = onboardCurrent(state)?.key === 'train'
   const rarity = rarityInfo(cdef.rarity)
   // 职责（战斗/坦克/医师）与攻击方式（群攻/单体…）是两件正交的事，两个标签都要给：
   // 只标"坦克"玩家不知道它打得怎么样，只标"群攻"又不知道它该站哪
@@ -681,7 +693,10 @@ function CharDetail({ id, onAssign, onSold }: { id: string; onAssign: (row: 'fro
           )}
         </div>
 
-        <div className="mt-3 flex items-center gap-2">
+        {/* ⚠️ `data-onb` 挂在**这一行**上，不是只挂在右边那颗按钮上 ——
+            蒙层挖的洞要把滑条一起放进来。只挖按钮的话，玩家想把结晶拉多一点也不行，
+            只能反复点同一个数（"一次修炼"教的是"打坐能提等级"，不是"点三次"）。 */}
+        <div className="mt-3 flex items-center gap-2" data-onb="train">
           <input type="range" min={10} max={snapCrystal} step={10}
             value={Math.min(trainAmt, snapCrystal)}
             onChange={e => setTrainAmt(Number(e.target.value))}

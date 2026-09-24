@@ -15,6 +15,11 @@ dist-ssr
 # 漏列一个（dist-test-recheck/、dist-vtmp/ 就这么漏过）就会在一次 `git add -A` 里被推上去。
 dist-*/
 *.local
+# 同类：双基座对比用的**构建产物**，只是目录名不带 dist- 前缀（.bridge-prod/ = /doupo/ 那份、
+# .bridge-test/ = /doupo-test/ 那份，各 13MB，197 个文件，内容就是 index.html + assets/*.js）。
+# 上面 dist-*/ 那条的教训在这儿原样重演了一次：名字不匹配 ⇒ 一次 `git add -A` 就是 26MB 进公开仓库。
+.bridge-prod/
+.bridge-test/
 
 # 密钥/备份文件，不进仓库
 .env
@@ -26,6 +31,10 @@ dist-*/
 *.bak6
 *.bak7
 *.bak8
+# 单文件回滚副本（部署/改动前 `cp` 出来的那一份）。
+# 上面那串 *.bakN 只拦得住纯数字后缀，`xxx.ts.bak-before-v164-20260923-204328`
+# 这种**带日期**的拦不住 —— 而它恰恰是后来最常用的一种命名。用 *.bak-* 一把锁住。
+*.bak-*
 # 素材全尺寸备份（159MB，v1.26 瘦身前的 1024 PNG）与抠图工具的逐文件回滚副本。
 # 这是**公开仓库**：目录一直没进过 git，只是没用 ignore 锁住 —— 一次 `git add -A` 就会全推进去。
 .backup-sprites-png/

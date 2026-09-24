@@ -7,6 +7,7 @@ import { sceneFor } from '../game/scenes'
 import { blessingIconFor } from '../game/blessings'
 import { itemSprite } from '../game/icons'
 import Ico from './Ico'
+import BottomSheet from './BottomSheet'
 import { impactFxForMonster, healFx } from '../game/fx'
 import { useCombatSound } from '../game/sound'
 import { LAB_BLESSINGS, isLabBoss, towerMonsterName, towerMonsterSpriteId, DUTY_OF_ROLE, enemyUnitsForFloor, PILLS, labPillCost, LAB_ESSENCE_COST, LAB_ESSENCE_AMOUNT, LAB_HERB_COST, LAB_HERB_AMOUNT, type BlessingCategory } from '../game/data'
@@ -73,6 +74,8 @@ export default function LabView() {
   // 挨打/出手的演出交给 EnemyCard 按 uid 判定，这里只保留屏幕级的击败闪动
   const monsterKilled = labEvents.some(e => e.type === 'kill' && active(atImpact(e), now, KILL_MS))
   const [confirming, setConfirming] = useState<string | null>(null)
+  // 手机端把商店收进弹窗（侧栏在手机上整块不渲染，见下方注释）
+  const [shopOpen, setShopOpen] = useState(false)
 
   const pickBlessing = (id: string) => {
     if (confirming) return
@@ -81,8 +84,47 @@ export default function LabView() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 sm:flex-row sm:gap-4 sm:p-4">
-      <div className="shrink-0 space-y-2 sm:w-56">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3 sm:flex-row sm:gap-4 sm:p-4">
+      {/* ── 手机端顶部状态条（`sm:hidden`）────────────────────────────────────
+          ★ 2026-09-22 用户：「手机天梯塔的页面没适配好，要把战斗页面挪上来」。
+          病因：手机端原来把**整个侧栏**（层数面板 + 祝福面板 + 开始/撤退 + 11 行商店）
+          以 `shrink-0` 堆在战场**上面** ⇒ 点完"开始爬塔"战斗画面在首屏之外，看不见打斗。
+          修法照战斗页（CombatView）已验过的那套：侧栏在手机上**整块不渲染**，
+          它承载的东西改由「顶部一条状态 + 底部按钮 + 商店弹窗」承担。 */}
+      <div className="flex shrink-0 items-stretch gap-2 sm:hidden">
+        <div className="dq-panel shrink-0 rounded-md px-2 py-1 text-center leading-tight">
+          <div className="text-[10px] text-[#a89478]">当前层数</div>
+          <div className="text-xl text-dq-gold">{lab.battle ? floor : '—'}</div>
+          <div className="text-[10px] text-[#a89478]">最高 {lab.highestFloor}</div>
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 overflow-hidden">
+          {lab.blessings.length === 0 ? (
+            <span className="text-[11px] text-[#5a4a38]">本次祝福：尚无（每 5 层首领三选一）</span>
+          ) : (
+            <div className="flex items-center gap-1 overflow-hidden">
+              {lab.blessings.map(id => {
+                const b = LAB_BLESSINGS.find(x => x.id === id)!
+                const color = CATEGORY_COLOR[b.category]
+                const icon = blessingIconFor(b.id)
+                return (
+                  <span key={id} title={`${b.name}：${b.desc}`}
+                    className="flex shrink-0 items-center rounded border px-1 py-0.5 text-[10px]" style={{ borderColor: color, color }}>
+                    {icon && <img src={icon} alt={b.name} className="mr-0.5 h-4 w-4 rounded object-cover" />}
+                    {b.name}
+                  </span>
+                )
+              })}
+            </div>
+          )}
+          <span className="truncate text-[10px] text-[#5a4a38]">{monsterName}{boss ? ' · 首领' : ''}</span>
+        </div>
+        <button onClick={() => setShopOpen(true)}
+          className="dq-tap-lg shrink-0 rounded border border-dq-border px-2.5 text-xs text-[#a89478]">
+          商店
+        </button>
+      </div>
+
+      <div className="hidden shrink-0 space-y-2 sm:block sm:w-56" data-lab-side>
         <div className="dq-panel rounded-md p-3 text-center">
           <div className="text-xs text-[#a89478]">当前层数</div>
           <div className="text-3xl text-dq-gold">{lab.battle ? floor : '—'}</div>
@@ -115,7 +157,7 @@ export default function LabView() {
         </div>
 
         <div className="flex gap-2">
-          <button onClick={() => game.toggleAutoLab()}
+          <button onClick={() => game.toggleAutoLab()} data-onb="lab-start"
             className={`flex-1 rounded px-3 py-2 text-sm ${lab.autoLab ? 'bg-dq-fire text-black' : 'bg-dq-gold text-black'}`}>
             {lab.autoLab ? '爬塔中（点击停止）' : '开始爬塔'}
           </button>
@@ -128,7 +170,8 @@ export default function LabView() {
         <LabShop />
       </div>
 
-      <div className={`relative flex min-h-[420px] min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-dq-border p-3 sm:min-h-0 sm:p-4 ${monsterKilled ? 'dq-screen-shake' : ''}`}
+      <div className={`relative flex min-h-[320px] min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-dq-border p-3 sm:min-h-0 sm:p-4 ${monsterKilled ? 'dq-screen-shake' : ''}`}
+        data-lab-arena
         style={scene ? { backgroundImage: `linear-gradient(180deg, rgba(10,8,20,0.6), rgba(8,6,16,0.88)), url(${scene})`, backgroundSize: 'cover', backgroundPosition: 'center' } : { background: '#1a1310' }}>
         <div className="mb-3 flex items-center justify-between text-sm sm:text-base">
           <div className="text-dq-gold">
@@ -214,6 +257,31 @@ export default function LabView() {
           ))}
         </div>
       </div>
+
+      {/* ── 手机端底部操作栏（`sm:hidden`）——与战斗页那颗主按钮同位同形，拇指够得着 ──
+          ⚠️ `data-onb="lab-start"` 在**桌面侧栏**与**这里**各有一个，是**故意**的：
+             引导的锚点查找走 `Onboarding.firstUsable()`，它逐个 `querySelectorAll` 结果判断，
+             跳过 `disabled` / `rect < 6px`（`display:none` 的 rect 全 0）/ `visibility:hidden`
+             ⇒ 手机上取到这颗可见的，桌面上取到侧栏那颗，**不会挖到隐藏按钮上**。
+             删掉任意一份都会让对应那一端没锚点可用（CombatView 的 `battle` 已是同样两处）。 */}
+      <div className="flex shrink-0 items-stretch gap-2 border-t border-dq-border pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:hidden">
+        {lab.battle && (
+          <button onClick={() => game.retreatLab()}
+            className="rounded border border-dq-border px-3 text-xs text-[#a89478]">撤退</button>
+        )}
+        <button onClick={() => game.toggleAutoLab()} data-onb="lab-start"
+          className={`flex-1 rounded px-3 py-2 text-sm text-black ${lab.autoLab ? 'bg-dq-fire' : 'bg-dq-gold'}`}>
+          {lab.autoLab ? '爬塔中（点击停止）' : '开始爬塔'}
+        </button>
+      </div>
+
+      {/* 手机端的商店弹窗。桌面端不走这里（侧栏里那 11 行按钮原位不动），
+          所以 `hideOn` 用默认的 `'sm'`：≥640px 时整块不渲染。 */}
+      {shopOpen && (
+        <BottomSheet title="论道令商店" onClose={() => setShopOpen(false)}>
+          <LabShop />
+        </BottomSheet>
+      )}
     </div>
   )
 }

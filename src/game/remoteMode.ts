@@ -7,7 +7,8 @@
 // `main.tsx` 能先 import 它做决定，而不会顺手把引擎建起来。
 //
 // 模式判定（优先级从高到低）：
-//   ① URL 参数 `?mode=client|local` —— **回滚开关**：线上出问题，加一个参数就退回老行为。
+//   ⓪ 构建闸门 `VITE_REQUIRE_REMOTE=1` —— 服务器权威服忽略所有本地回滚开关。
+//   ① URL 参数 `?mode=client|local` —— **回滚开关**：开发/灰度环境出问题时可退回老行为。
 //      选中后写进 localStorage 的 `MODE_KEY`，刷新/跳转都跟着走（参数只在当次导航有效）。
 //   ② localStorage 的 `MODE_KEY`（上一次选过的）。
 //   ③ 构建期全量：`VITE_REMOTE_DEFAULT=1` ⇒ 无条件全员远程。
@@ -41,6 +42,12 @@ let explicit = false
  * @param search 当前 `location.search`（例如 `?mode=client`）
  */
 export function decideMode(search = ''): ClientMode {
+  if (REQUIRE_REMOTE) {
+    explicit = true
+    decided = 'client'
+    return decided
+  }
+
   let fromUrl: ClientMode | null = null
   try {
     const m = new URLSearchParams(search).get('mode')
@@ -82,6 +89,9 @@ const ROLLOUT_PERCENT = ((): number => {
   return Math.max(0, Math.min(100, Math.floor(raw)))
 })()
 
+/** 服务器权威服构建闸门：启用后忽略本地模式开关和灰度分流。 */
+const REQUIRE_REMOTE = import.meta.env.VITE_REQUIRE_REMOTE === '1'
+
 /**
  * 把存档码散成 0-99 的桶号（FNV-1a）。
  *
@@ -121,6 +131,8 @@ function bucketOf(id: string): number {
  *    这一条是本文件最容易写错的地方。
  */
 export function applyRollout(playerId: string, hasAccount: boolean): ClientMode {
+  if (REQUIRE_REMOTE) { decided = 'client'; return decided }
+
   // ①② 是玩家/运营的显式选择，灰度一律不推翻
   if (explicit) {
     if (decided === null) decided = 'local'   // 到不了这里（①② 一定赋过值），防御性的

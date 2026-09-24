@@ -1,15 +1,37 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Swords } from 'lucide-react'
-import { useGame, game, charLabel, rarityInfo, baseCombatEffectOf, newbieCurrent, BASE_CRIT_DMG, type CombatEffect } from '../game/engine'
+import { useGame, game, charLabel, rarityInfo, baseCombatEffectOf, BASE_CRIT_DMG, type CombatEffect } from '../game/engine'
 import { portraitFor } from '../game/portraits'
 import { LINK_POSTER_KEY } from '../game/storageKeys'
-import linkPoster from '../assets/sprites/link/poster.webp'
+import posterFanren from '../assets/sprites/link/poster.webp'
+import posterYanyun from '../assets/sprites/link/poster-yanyun.webp'
 import {
   CHARACTERS, RARITY_INFO, ROLE_LABEL, ROLE_TARGET_HINT,
   DUTY_OF_ROLE, DUTY_LABEL, DUTY_COLOR, FACTIONS, FACTION_OF,
-  shardCostOf, isLinkChar, linkActive, linkRemainMs, linkClosedText, LINK_START_MS, LINK_SHARD_COST,
-  type CharacterDef, type Rarity,
+  shardCostOf, isLinkChar, linkGettable, activeLinkSeason, linkRemainMs, linkClosedText, LINK_SHARD_COST,
+  type CharacterDef, type Rarity, type LinkSeason,
 } from '../game/data'
+
+/**
+ * 每期联名的运营海报。**必须按时区取** —— 拿上一期的海报去配这一期的角色，
+ * 玩家第一眼就会以为搞错了（现有那份画的是韩立与银月，与燕云毫无关系）。
+ *
+ * ⚠️ 新增一期时这里要是漏配，`LINK_POSTER[s.id]` 给的是 `undefined`，
+ *    `<img src={undefined}>` **不报错**、只是安静地渲染成一张空图 ——
+ *    所以配套判据里有一条专门验"当期的海报真的加载出来了"（`naturalWidth > 0`）。
+ */
+const LINK_POSTER: Record<string, string> = {
+  fanren: posterFanren,
+  yanyun: posterYanyun,
+}
+/** 每期联名的主题色（横幅与海报浮层的边框、标题）。缺席时退回凡人那支青色 */
+const LINK_COLOR: Record<string, string> = { fanren: '#5eead4', yanyun: '#d9b45b' }
+const linkColorOf = (s: LinkSeason) => LINK_COLOR[s.id] ?? '#5eead4'
+/**
+ * "这一期的海报弹过了"写进本地存储的标记。
+ * 存的是 **期次 id + 起始时刻**：再开新一期时两者都不同，会自动再弹一次，不需要人工清。
+ */
+const posterMarkOf = (s: LinkSeason) => `${s.id}:${s.startMs}`
 
 /**
  * 全站统一的角色排序：品阶从高到低（圣 → 黄）。
@@ -110,8 +132,8 @@ function RecruitDetail({ c, owned, shards, onClose, onRedeem }: {
   const portrait = portraitFor(c.id)
   const cost = shardCostOf(c)
   const afford = shards >= cost
-  // 限时联动：活动结束后这名武魂不再可获得（已拥有的照常显示战力，不受影响）
-  const linkOver = isLinkChar(c.id) && !linkActive()
+  // 限时联动：这一期结束后这名武魂不再可获得（已拥有的照常显示战力，不受影响）
+  const linkOver = !linkGettable(c.id)
   // powerOf 对未收录的角色返回 0（不是抛错），所以这里可以直接调，不用先判 owned。
   // 取整：它返回的是 charPower 的**未取整**值（装备一键最优穿戴拿它当搜索目标，要小数），
   // 直接渲染会显示 35.1795 这种数；群雄榜的 combatPower 与装备页的涨幅都是 Math.round 过的
@@ -218,8 +240,11 @@ function RecruitDetail({ c, owned, shards, onClose, onRedeem }: {
           ) : linkOver ? (
             /* 限时联动**当前拿不到**的未拥有角色：图鉴仍留名（让玩家知道缺的是谁），
                但不再摆一个必然失败的按钮。措辞按时段取（活动开始前说"已结束"是假话） */
+            /* 措辞按**这名角色自己那一期**取（linkClosedText(c.id)）：
+                第二期开着的时候点开韩立，说的是"凡人修仙传联动已结束"，
+                而不是笼统的"限时联动已结束" —— 后者会让人以为眼下的燕云也结束了 */
             <div data-link-over className="text-[#a89478]">
-              {linkClosedText()}
+              {linkClosedText(c.id)}
             </div>
           ) : (
             <>
@@ -262,8 +287,15 @@ export default function RecruitView() {
   const annTimer = useRef<number | null>(null)
   const pity = game.pityState()
 
-  /** 联动是否进行中。**每次渲染重新算** —— 它是个纯函数，不需要塞进 state */
-  const linkOn = linkActive()
+  /**
+   * 正在进行的那一期联名（没有则 null）。**每次渲染重新算** —— 它是个纯函数，不需要塞进 state。
+   * 横幅、倒计时、兑换区排序、海报浮层全部由它驱动：换期时只改 data.ts 里的 `LINK_SEASONS`，
+   * 这个组件一个字都不用动。
+   */
+  const season = activeLinkSeason()
+  const linkOn = season !== null
+  /** 这名是不是**本期**联名角色。历史期的联动角色不算 —— 他们已经不再可获取 */
+  const inSeason = (id: string) => !!season && season.charIds.includes(id)
 
   useEffect(() => {
     if (!linkOn) return
@@ -282,25 +314,28 @@ export default function RecruitView() {
   }, [announce])
 
   useEffect(() => {
-    if (!linkActive()) return
-    // "弹过了"存的是**这一轮活动的起始时刻**：下次再开新联动时间戳不同，会自动再弹，不用人工清
-    if (localStorage.getItem(LINK_POSTER_KEY) === String(LINK_START_MS)) return
+    const s = activeLinkSeason()
+    if (!s) return
+    // "弹过了"存的是**期次 id + 起始时刻**（见 posterMarkOf）：再开新一期会自动再弹，不用人工清
+    if (localStorage.getItem(LINK_POSTER_KEY) === posterMarkOf(s)) return
     setPoster(true)
   }, [])
 
   const closePoster = () => {
     setPoster(false)
+    const s = activeLinkSeason()
+    if (!s) return
     // 隐私模式下 localStorage 会抛异常 —— 写不进去只是"下次还会弹"，不该影响关掉海报
-    try { localStorage.setItem(LINK_POSTER_KEY, String(LINK_START_MS)) } catch { /* ignore */ }
+    try { localStorage.setItem(LINK_POSTER_KEY, posterMarkOf(s)) } catch { /* ignore */ }
   }
 
   const shards = state.inventory.shard ?? 0
   // 只列未拥有的：已拥有的会被引擎拒掉，摆出来只是让玩家点一个必然失败的按钮。
-  // 联动角色在**活动结束后**从兑换区移出（图鉴里仍留名，见 catalog）
+  // 联动角色在**自己那一期结束后**从兑换区移出（图鉴里仍留名，见 catalog）
   const unowned = CHARACTERS
-    .filter(c => !state.roster[c.id] && (!isLinkChar(c.id) || linkOn))
-    // 活动期内联动角色排最前：这是当期主推，淹在 8 个圣阶里就等于没做
-    .sort((a, b) => (Number(isLinkChar(b.id)) - Number(isLinkChar(a.id))) || byRarityDesc(a, b))
+    .filter(c => !state.roster[c.id] && linkGettable(c.id))
+    // 当期联动角色排最前：这是当期主推，淹在 9 个圣阶里就等于没做
+    .sort((a, b) => (Number(inSeason(b.id)) - Number(inSeason(a.id))) || byRarityDesc(a, b))
   // 图鉴（`...` 复制一份再排，CHARACTERS 是 import 的常量数组，原地 sort 会污染所有用它的地方）
   const catalog = [...CHARACTERS].sort(byRarityDesc)
 
@@ -331,9 +366,12 @@ export default function RecruitView() {
     }, at * PULL_STEP_MS + 320)
   }
 
-  // 新手之路第 3 步指向的就是这两个按钮：呼吸灯亮在**引导话术指的那一个**上
-  // （够十连时引导条写的是「十连必出天阶」，那就该亮十连那个；亮错一个等于指错路）。
-  const nbRecruit = newbieCurrent(state)?.key === 'recruit'
+  // ⚠️ v1.58 起招募**不在引导路线里**（`onboardSteps` 里没有这一步，
+  //    "第一次抽卡"不是必修课）。这两个呼吸灯于是**没有来源了** —— 常量 false 比删掉整段
+  //    更稳：`nbTenPull` / `nbOnePull` 还挂在两个按钮的 className 上，
+  //    删了就要连带改两处 JSX（容易漏一个，症状是"其中一个按钮永远亮着"）。
+  //    真要把招募收进引导，把这里换成 `onboardCurrent(state)?.key === 'recruit'` 即可。
+  const nbRecruit = false
   /*
    * ⚠️ **这一页的 `✨` 是故意留着的，别顺手"清理"掉。**
    * 它出现在价格与角标里（`✨×60`、`✨+N`），而 `verify-shard` / `verify-recruit-detail` /
@@ -358,17 +396,17 @@ export default function RecruitView() {
       <div className="dq-panel w-full max-w-xl rounded-md p-4 text-center">
         {/* 限时联动横幅。⚠️ 结构写死成"两行固定高度"，倒计时只换数字不换布局：
             这一页的红线是"数据在变不许把版面推来推去"（见 probe-boss-jitter 的同类教训） */}
-        {linkOn && (
-          <div data-link-banner className="mb-3 rounded border px-2 py-1.5 text-left"
-            style={{ borderColor: '#5eead4' }}>
+        {linkOn && season && (
+          <div data-link-banner data-link-season={season.id} className="mb-3 rounded border px-2 py-1.5 text-left"
+            style={{ borderColor: linkColorOf(season) }}>
             <div className="flex items-center justify-between gap-2 text-[11px]">
-              <span style={{ color: '#5eead4' }}>凡人修仙传 联动进行中</span>
+              <span style={{ color: linkColorOf(season) }}>{season.title} 联动进行中</span>
               <span className="shrink-0 tabular-nums text-[#c9bda4]" data-link-remain>
                 剩余 <span className="inline-block w-[38px] text-right">{remainText(linkRemainMs())}</span>
               </span>
             </div>
             <div className="mt-0.5 text-[11px] text-[#a89478]">
-              韩立 / 银月 限时加入招募（圣阶）· 兑换需 ✨×{LINK_SHARD_COST} · 结束后移出卡池与兑换
+              {season.tagline} · 兑换需 ✨×{LINK_SHARD_COST} · 结束后移出卡池与兑换，武魂名录继续展示
             </div>
           </div>
         )}
@@ -592,17 +630,17 @@ export default function RecruitView() {
           z-40 压在详情/确认浮层之上 —— 它只在进页面时出现，不该被别的东西盖住。
           ⚠️ 海报图里**没有烧任何文字**（生图模型画中文必糊），文案一律由这里叠上去，
           改活动时间/改文案都不用重新生图。 */}
-      {poster && (
-        <div data-link-poster className="fixed inset-0 z-40 flex items-center justify-center bg-black/85 p-4" onClick={closePoster}>
+      {poster && season && (
+        <div data-link-poster data-link-season={season.id} className="fixed inset-0 z-40 flex items-center justify-center bg-black/85 p-4" onClick={closePoster}>
           <div className="max-h-full w-full max-w-xs overflow-auto rounded-lg border-2 bg-dq-panel shadow-2xl"
-            style={{ borderColor: '#5eead4' }} onClick={e => e.stopPropagation()}>
-            <img src={linkPoster} alt="凡人修仙传联动" className="w-full" />
+            style={{ borderColor: linkColorOf(season) }} onClick={e => e.stopPropagation()}>
+            {/* ⚠️ 海报**按时区取**（LINK_POSTER）：拿上一期那张去配这一期的角色，
+                玩家第一眼就会以为搞错了（现有那份画的是韩立与银月，与燕云毫无关系） */}
+            <img src={LINK_POSTER[season.id]} alt={`${season.title}联动`} className="w-full" />
             <div className="p-3 text-center">
-              <div className="text-sm" style={{ color: '#5eead4' }}>凡人修仙传 × 焚炎异录</div>
-              <div className="mt-1 text-xs text-dq-gold">限时联动 · 韩立 / 银月 加入招募</div>
-              <div className="mt-1 text-[11px] text-[#a89478]">
-                两名圣阶武魂 · 活动期 24 小时 · 结束后移出抽卡池与兑换
-              </div>
+              <div className="text-sm" style={{ color: linkColorOf(season) }}>{season.title} × 焚炎异录</div>
+              <div className="mt-1 text-xs text-dq-gold">限时联动 · {season.tagline}</div>
+              <div className="mt-1 text-[11px] text-[#a89478]">{season.note}</div>
               <div className="mt-0.5 text-[11px] text-[#a89478]">
                 角色碎片兑换需 ✨×{LINK_SHARD_COST}
               </div>

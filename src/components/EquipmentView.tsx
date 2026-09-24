@@ -4,11 +4,20 @@ import { useGame, game, charLabel, charStats, rarityInfo, fmtNum } from '../game
 import { portraitFor } from '../game/portraits'
 import { equipSlotIcon } from '../game/equipIcons'
 import {
-  SLOT_INFO, AFFIX_LABEL, EQUIP_BREAKDOWN, EQUIP_ENH_PER_LV,
-  type EquipSlot, type EquipItem, type EquipAffix,
+  SLOT_INFO, AFFIX_LABEL, EQUIP_BREAKDOWN, EQUIP_ENH_PER_LV, RARITY_INFO,
+  type EquipSlot, type EquipItem, type EquipAffix, type Rarity,
 } from '../game/data'
 
 const SLOTS: EquipSlot[] = ['weapon', 'armor', 'accessory', 'ring']
+
+/**
+ * 批量分解确认框里那六个品阶，**按阶序从高到低**（圣阶在最前，与玩家看图鉴的顺序一致）。
+ *
+ * 从 `RARITY_INFO` 推出来，**不手抄一份** —— 以后再加品阶，这里自动跟上；
+ * 抄一份的话，新缩进去的品阶会永远选不到、也就永远分解不掉（还不报错，只是"少了一项"）。
+ */
+const ALL_QUALITIES = (Object.keys(RARITY_INFO) as Rarity[])
+  .sort((a, b) => RARITY_INFO[b].order - RARITY_INFO[a].order)
 
 /** 分解产物文案（详情浮层与确认框共用，保证口径一致） */
 function breakdownText(item: EquipItem): string {
@@ -165,7 +174,10 @@ function ItemDetailModal({ item, compare, onBreakdown, onReforge, onUndoReforge,
                   +{enhPct(enh.lv)}% <span className="text-[#5a4a38]">→</span> <span className="text-green-400">+{enhPct(enh.lv + 1)}%</span>
                 </span>
               </div>
-              <div className="mt-2 flex gap-2">
+              {/* ⚠️ `data-onb` 挂在**这一行**（两颗按钮一起）而不是只挂「强化 +1」：
+                  蒙层挖的洞略大一点，玩家按「强化至满级」也一样过（`enhance` 那一步的判据是
+                  "身上有件装备 lv>=1"，不是"按过哪颗按钮"）。 */}
+              <div className="mt-2 flex gap-2" data-onb="enhance">
                 <button onClick={() => onEnhance?.(1)} disabled={!canEnhance || !affordOne}
                   className={`flex-1 rounded border py-1.5 text-xs ${canEnhance && affordOne
                     ? 'border-dq-gold bg-dq-gold/15 text-dq-gold hover:bg-dq-gold/25'
@@ -273,7 +285,16 @@ export default function EquipmentView() {
    */
   const [peekId, setPeekId] = useState<string | null>(null)
   const peekItem = peekId ? game.findEquip(peekId) : null
-  const [junkPreview, setJunkPreview] = useState<{ count: number; essence: number; xuanjing: number } | null>(null)
+  /**
+   * 批量分解确认框。`junkQuals` 是玩家勾选的品阶（**默认全选** = 改版前的行为）。
+   *
+   * ⚠️ 这里存的是"确认框开着吗 + 勾了哪些"，而**不存预览出来的数字** —— 数字每次渲染
+   *    现算（`junkPreview`），所以勾选一变、背包一变（边打边掉装备），框里的数就跟着变。
+   *    存下来就会出现"框里写着 3746、实际按下去分解的是别的数"这种不可逆的错。
+   */
+  const [junkOpen, setJunkOpen] = useState(false)
+  const [junkQuals, setJunkQuals] = useState<Rarity[]>(ALL_QUALITIES)
+  const junkPreview = junkOpen ? game.junkPreview(junkQuals) : null
   const [toast, setToast] = useState<DetailMsg | null>(null)
   const [reforgeMsg, setReforgeMsg] = useState<DetailMsg | null>(null)
   const [enhanceMsg, setEnhanceMsg] = useState<DetailMsg | null>(null)
@@ -356,21 +377,32 @@ export default function EquipmentView() {
     setToast({ text: `分解 1 件，获得武魂精血 ×${r.essence}${r.xuanjing ? ` · 玄晶 ×${r.xuanjing}` : ''}${back}`, bad: false })
   }
 
-  /** 先扫一遍算出会分解多少、产出多少，让玩家确认后才真正执行 */
+  /**
+   * 打开确认框。**数字交给引擎的 `junkPreview` 算，界面不许自己再扫一遍背包** ——
+   * 预览和真正执行必须是同一个判断，否则就是两份实现，迟早对不上；
+   * 而这一步**不可逆**（分解不退费、也找回不了），"框里说 100、实际吃掉 3746"没人能补救。
+   */
   function previewJunk() {
-    let count = 0, essence = 0, xuanjing = 0
-    for (const item of state.equipBag) {
-      if (!game.isJunkEquip(item)) continue
-      const b = EQUIP_BREAKDOWN[item.quality]
-      count++; essence += b.essence; xuanjing += b.xuanjing
+    if (!game.junkPreview(ALL_QUALITIES).count) {
+      setToast({ text: '没有可分解的装备（背包里都还有用武之地）', bad: true })
+      return
     }
-    if (!count) { setToast({ text: '没有可分解的装备（背包里都还有用武之地）', bad: true }); return }
-    setJunkPreview({ count, essence, xuanjing })
+    // 每次打开都**从全选开始**，不继承上一次的收窄 —— 一个不可逆的操作，
+    // 开场状态必须是"和以前一模一样的那一个"，不能是"上次你选了什么"。
+    setJunkQuals(ALL_QUALITIES)
+    setJunkOpen(true)
+  }
+
+  /** 勾选/取消一个品阶。全都取消是**合法**的（= 这次一件都不分解），确认键会因此变灰 */
+  function toggleQual(q: Rarity) {
+    setJunkQuals(prev => prev.includes(q) ? prev.filter(x => x !== q) : [...prev, q])
   }
 
   async function confirmJunk() {
-    const r = await game.breakdownJunk()
-    setJunkPreview(null)
+    // 先按下的那一刻固定住这次的选择，再发出去（远程模式下中间隔着一次往返）
+    const quals = junkQuals
+    setJunkOpen(false)
+    const r = await game.breakdownJunk(quals)
     const back = r.refundCrystal ? ` · 退还斗气结晶 ×${fmtNum(r.refundCrystal)} / 武魂精血 ×${fmtNum(r.refundEssence)}` : ''
     setToast({ text: `分解 ${r.count} 件，获得武魂精血 ×${r.essence}${r.xuanjing ? ` · 玄晶 ×${r.xuanjing}` : ''}${back}`, bad: false })
   }
@@ -416,7 +448,10 @@ export default function EquipmentView() {
             <div className="flex flex-wrap gap-2">
               {/* 这两个是装备页的主操作（一键穿戴 / 一键分解）。实测手机端只有 27px 高，
                 是全页最该按得准的两个键 —— 它们点的都是"批量改动"，按错一次很难撤销 */}
-              <button onClick={doAutoEquip}
+              {/* ⚠️ `data-onb="auto-equip"` 是蒙层引导的**备用**落点（`equip` 那一步的锚点表里
+                  排第二）：背包里那一排「穿戴」按钮在窄屏上要滚才看得见，而这一颗永远在顶栏。
+                  引导优先挖「穿戴」，挖不到才退到这儿 —— 两颗的效果一样（都是把装备挂上去）。 */}
+              <button onClick={doAutoEquip} data-onb="auto-equip"
                 className="dq-tap-lg inline-flex items-center justify-center rounded bg-dq-gold px-2.5 py-1 text-[11px] text-black">一键最优穿戴</button>
               <button onClick={previewJunk}
                 className="dq-tap-lg inline-flex items-center justify-center rounded border border-dq-border px-2.5 py-1 text-[11px] text-[#e8dcc8] hover:border-dq-fire">一键分解垃圾</button>
@@ -438,7 +473,7 @@ export default function EquipmentView() {
                       <span className={`rounded px-1 font-mono ${lv > 0 ? 'bg-dq-gold/20 text-dq-gold' : 'text-[#5a4a38]'}`}>+{lv}</span>
                     )}
                   </div>
-                  <button onClick={() => item && openItem(item)} disabled={!item}
+                  <button onClick={() => item && openItem(item)} disabled={!item} data-onb="open-item"
                     className="dq-iconplate mx-auto mb-1 block h-11 w-11 overflow-hidden rounded sm:h-14 sm:w-14">
                     {icon && <img src={icon} alt={slot} className="h-full w-full object-cover" style={{ opacity: item ? 1 : 0.3 }} />}
                   </button>
@@ -477,7 +512,7 @@ export default function EquipmentView() {
                   <div key={item.id} className="relative rounded border p-1.5 text-center text-[10px]" style={{ borderColor: color }}>
                     {/* 强化等级外显：卡片右上角徽章，>=1 级才上金色 */}
                     <span className={`pointer-events-none absolute right-0.5 top-0.5 rounded bg-black/70 px-1 font-mono text-[9px] ${lv > 0 ? 'text-dq-gold' : 'text-[#5a4a38]'}`}>+{lv}</span>
-                    <button onClick={() => openItem(item)} className="dq-iconplate mx-auto block h-10 w-10 overflow-hidden rounded">
+                    <button onClick={() => openItem(item)} data-onb="open-item" className="dq-iconplate mx-auto block h-10 w-10 overflow-hidden rounded">
                       {icon && <img src={icon} alt={item.slot} className="h-full w-full object-cover" />}
                     </button>
                     <button onClick={() => openItem(item)} className="w-full truncate" style={{ color }}>{item.name}</button>
@@ -485,7 +520,7 @@ export default function EquipmentView() {
                       {gained >= 1 ? `↑ 战力 +${fmtNum(gained)}` : gained <= -1 ? '不如当前' : '≈ 持平'}
                     </div>
                     <div className="mt-1">
-                      <button onClick={() => game.equipItem(selectedChar, item.id)}
+                      <button onClick={() => game.equipItem(selectedChar, item.id)} data-onb="equip"
                         className="w-full rounded bg-dq-gold py-0.5 text-black">穿戴</button>
                     </div>
                     <button onClick={() => doBreakdown(item)}
@@ -511,19 +546,51 @@ export default function EquipmentView() {
       )}
 
       {junkPreview && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/75 p-4" onClick={() => setJunkPreview(null)}>
-          <div className="w-64 rounded border border-dq-fire bg-dq-panel p-3 text-xs shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/75 p-4" onClick={() => setJunkOpen(false)}>
+          <div className="w-[22rem] max-w-full rounded border border-dq-fire bg-dq-panel p-3 text-xs shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="mb-2 text-dq-fire">确认批量分解？</div>
             <div className="space-y-1 text-[#c9bda4]">
-              <div>将分解 <span className="text-[#e8dcc8]">{junkPreview.count}</span> 件装备</div>
+              <div>将分解 <span data-dec-count className="text-[#e8dcc8]">{junkPreview.count}</span> 件装备</div>
               <div>获得 武魂精血 ×{junkPreview.essence}{junkPreview.xuanjing ? ` · 玄晶 ×${junkPreview.xuanjing}` : ''}</div>
             </div>
+
+            {/* ── 品阶多选（v1.64，用户「一键分解装备允许用户自定义分解的装备品质」）────
+                默认**全选** ⇒ 打开就是改版前那个行为，取消勾选才是收窄。
+                （反过来做成"默认不勾 = 不限"的话，玩家会以为自己在筛选、其实什么都没筛 ——
+                 一个不可逆的操作不该有一个"必须读完说明才理解得了"的开场状态。）
+
+                ⚠️ 勾选只改**范围**，不改保护：即使勾了圣阶，「换上会变强」的那件也照样保留。
+                   下面那句话因此必须留着 —— 它是这个框里唯一说明"你的好装备不会被吃掉"的文案。 */}
+            <div className="mt-2 border-t border-dq-border pt-2">
+              <div className="mb-1.5 text-[11px] text-[#a89478]">选择装备等级（可多选）</div>
+              <div className="flex flex-wrap gap-1.5">
+                {ALL_QUALITIES.map(q => {
+                  const on = junkQuals.includes(q)
+                  const c = rarityInfo(q).color
+                  return (
+                    <button key={q} onClick={() => toggleQual(q)} role="checkbox" aria-checked={on}
+                      data-dec-q={q} data-dec-q-on={on ? '1' : '0'}
+                      className="flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition-colors"
+                      style={{ borderColor: on ? c : '#5a4a38', color: on ? c : '#8a7658', backgroundColor: on ? `${c}1f` : 'transparent' }}>
+                      <span className="inline-block h-3 w-3 shrink-0 rounded-sm border"
+                        style={{ borderColor: on ? c : '#5a4a38', backgroundColor: on ? c : 'transparent' }} />
+                      {rarityInfo(q).label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
             <div className="mt-2 text-[10px] text-[#a89478]">
               只分解「所有上阵武魂换上都不会变强」的装备，可能还有用的会保留。
             </div>
+            {junkPreview.count === 0 && (
+              <div className="mt-1.5 text-[10px] text-dq-fire">一件都没勾 —— 这次不会有装备被分解</div>
+            )}
             <div className="mt-3 flex gap-2">
-              <button onClick={confirmJunk} className="flex-1 rounded bg-dq-fire py-1 text-black">确认分解</button>
-              <button onClick={() => setJunkPreview(null)} className="flex-1 rounded border border-dq-border py-1 hover:border-dq-gold">取消</button>
+              <button onClick={confirmJunk} disabled={junkPreview.count === 0}
+                className={`flex-1 rounded py-1 ${junkPreview.count === 0 ? 'cursor-not-allowed bg-[#3a2a1a] text-[#5a4a38]' : 'bg-dq-fire text-black'}`}>确认分解</button>
+              <button onClick={() => setJunkOpen(false)} className="flex-1 rounded border border-dq-border py-1 hover:border-dq-gold">取消</button>
             </div>
           </div>
         </div>

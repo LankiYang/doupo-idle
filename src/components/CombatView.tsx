@@ -1,6 +1,6 @@
 import { useState, useMemo, type ReactNode } from 'react'
 import { AlertTriangle, ChevronRight, Hourglass, ScrollText, Swords } from 'lucide-react'
-import { useGame, game, charLabel, charStats, rarityInfo, itemLabel, nextGuides, newbieSteps, newbieCurrent, type GameState } from '../game/engine'
+import { useGame, game, charLabel, charStats, rarityInfo, itemLabel, nextGuides, onboardCurrent, type GameState } from '../game/engine'
 import { itemSprite } from '../game/icons'
 import { portraitFor } from '../game/portraits'
 import { monsterSpriteFor } from '../game/monsters'
@@ -13,7 +13,9 @@ import BottomSheet from './BottomSheet'
 import { active, atImpact, DASH_MS, HIT_MS, IMPACT_MS, KILL_MS, DebuffBadge, FloatingNumbers, ImpactFx } from './combatFx'
 import Ico from './Ico'
 
-type Tab = 'roster' | 'combat' | 'recruit' | 'shop'
+// ⚠️ `'story'` 在 v1.60 **只可能由这里** `onNavigate` 出去（顶层页签已撤）——
+// 上面那条状态行上的「剧情 ›」是它唯一的入口。别因为"页签表里没有它"就把这个字面量清掉。
+type Tab = 'roster' | 'combat' | 'recruit' | 'shop' | 'story'
 
 /**
  * 没有具体形象的两条建议（卡关 / 僵持）用 lucide 线性图标 —— 它们是"状态"不是"物品"，
@@ -234,18 +236,24 @@ export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => v
    * 比"读 window 宽度再分支渲染"少一条会出错的路径。
    */
   const [pickerOpen, setPickerOpen] = useState(false)
-  const [logOpen, setLogOpen] = useState(false)
+  // ★ 战斗日志**手机端默认展开**（用户 2026-09-22：「手机端战斗日志默认展开，高度要固定，
+  //   不要动态一会儿撑开一会儿变矮」）。原来默认 `false` ⇒ 手机上整块 `hidden`，
+  //   新玩家根本不知道有战斗过程可看（桌面端不受这个值影响，见下面容器上的 `sm:block`）。
+  const [logOpen, setLogOpen] = useState(true)
 
   const mainEvents = state.combatEvents.filter(e => e.source === 'main')
   useCombatSound(mainEvents)
   // 挨打/出手/被击败的演出由 EnemyCard 自己按 uid 判定，这里只留屏幕级的那一个
   const monsterKilled = mainEvents.some(e => e.type === 'kill' && active(atImpact(e), now, KILL_MS))
-  // 新手之路在的时候，战斗页不再叠 mid-game 提示：新号开局就有 5 颗缘分丹，nextGuides 必然弹出
-  // "攒了 5 颗缘分丹，去招募抽个新武将" —— 与新手之路第 3 步指的是同一件事。
-  // 一次只给一个指令；三步走完（newbieSteps 返回 null）后 nextGuides 自然恢复。
-  const guides = newbieSteps(state) ? [] : nextGuides(state)
-  // 新手之路第 1 步指向的就是这个按钮：呼吸灯亮在这里（引导条自己不再亮，见 NewbiePath 注释）
-  const nbBattle = newbieCurrent(state)?.key === 'battle' && !state.autoBattle
+  // 引导在的时候，战斗页不再叠 mid-game 提示：新号开局就有 5 颗缘分丹，nextGuides 必然弹出
+  // "攒了 5 颗缘分丹，去招募抽个新武将" —— 与蒙层指的常常不是同一件事。
+  // 一次只给一个指令；引导整条走完（`onboardCurrent` 返回 null）后 nextGuides 自然恢复。
+  const onbStep = onboardCurrent(state)
+  const guides = onbStep ? [] : nextGuides(state)
+  // 引导第①件事（开战）指向的就是这个按钮：呼吸灯亮在这里。
+  // ⚠️ 判据只有 `onboardCurrent` 一处 —— 蒙层的挖洞锚点也读同一个 `step.key`，
+  //    两处各判一次必然漂（"蒙层挖在这个按钮上，呼吸灯却亮在别处"）。
+  const nbBattle = onbStep?.key === 'battle' && !state.autoBattle
 
   const logLines = mainEvents.filter(e => e.time <= now).slice(-12).reverse()
 
@@ -261,7 +269,7 @@ export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => v
         )}
         <RoutePanel stage={stage} />
         <button onClick={() => game.toggleAutoBattle()}
-          data-newbie-hint={nbBattle ? '1' : undefined}
+          data-newbie-hint={nbBattle ? '1' : undefined} data-onb="battle"
           className={`w-full rounded px-3 py-2 text-sm ${state.autoBattle ? 'bg-dq-fire text-black' : 'bg-dq-gold text-black'} ${nbBattle ? 'dq-breath' : ''}`}>
           {state.autoBattle ? '自动出战中（点击停止）' : '开启自动出战'}
         </button>
@@ -292,10 +300,20 @@ export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => v
           <div className="text-xs text-[#a89478] sm:text-sm">累计击杀 {state.kills}</div>
         </div>
 
-        <div className="mb-2 px-3 text-sm text-[#a89478] sm:px-0">
+        <div className="mb-2 flex flex-wrap items-center gap-x-2 px-3 text-sm text-[#a89478] sm:px-0">
           <span className="sm:hidden">累计击杀 {state.kills}</span>
           {!state.battle && <span className="sm:hidden"> · </span>}
           {!state.battle && <span>尚未出战，点击"开启自动出战"</span>}
+          {/* 「剧情」的门（v1.60）。用户 2026-09-22「**旅程也不要了，就只剩蒙层引导**」——
+              顶层页签撤了，但**剧情内容一个字没删**，门挪到这条状态行上（弱剧情 ≠ 删剧情）。
+              ⚠️ 三件事别做：① 别把它做大成第二个页签（那就违背了"不要了"）；
+                 ② 别删它（删了 `StoryView` 就彻底够不着，等于把剧情删了）；
+                 ③ 别挂在标题行上 —— 那一行是 `hidden sm:flex`，手机端看不到，
+                    而手机端恰恰是新手的主场。这一行两端都在。
+              锚点 `data-onb="story-door"` 只给判据用（`verify-onboard-v160.cjs` 按它证明"门还在"），
+              蒙层**不会**挖它 —— 引导表里没有一步指向这里。 */}
+          <button onClick={() => onNavigate('story')} data-onb="story-door"
+            className="ml-auto shrink-0 text-xs text-dq-gold hover:underline">剧情 ›</button>
         </div>
 
         {guides.length > 0 && (
@@ -332,15 +350,21 @@ export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => v
           </div>
         </div>
 
-        {/* 手机端：日志折叠开关。**放在日志容器外面**，这样容器本身的 class
-            与改造前逐字一致，桌面端一个字节都没动（见下面那个 div）。 */}
+        {/* 手机端：日志折叠开关。**放在日志容器外面**（容器本身的 class 只管自己的形态）。
+            ★ 2026-09-22：默认改成展开，手机端才看得到战斗过程（见上面 `logOpen` 的注释）。 */}
         <button onClick={() => setLogOpen(v => !v)}
           className="mx-3 mb-2 flex shrink-0 items-center gap-1 rounded border border-dq-border bg-black/40 px-2 py-1.5 text-[11px] text-[#a89478] sm:hidden">
           <ScrollText size={12} />战斗日志
           <span className="ml-auto text-dq-gold">{logOpen ? '收起 ▾' : '展开 ▸'}</span>
         </button>
 
-        <div className={`mx-3 mb-3 rounded border border-dq-border bg-black/40 p-2 text-xs sm:mx-0 sm:mb-0 sm:flex-1 sm:overflow-auto ${logOpen ? 'max-h-32 shrink-0 overflow-auto' : 'hidden sm:block'}`}>
+        {/* ⚠️ 手机端的高度必须**写死**（`h-32`）：原来只有 `max-h-32`（上限、无下限），
+            盒子是按 `logLines` 的条数由内容撑开的 —— 而条数一直在变（引擎每 tick 按 3 秒窗口
+            裁剪旧事件、新事件又不断进来）⇒ 日志框**一会儿撑开一会儿变矮**，
+            还把整页内容高度带着一起跳（用户 2026-09-22 报的就是这个）。
+            `sm:h-auto` 是给桌面的：桌面靠 `sm:flex-1` 分剩余空间，别被这个固定高盖掉。 */}
+        <div className={`mx-3 mb-3 rounded border border-dq-border bg-black/40 p-2 text-xs sm:mx-0 sm:mb-0 sm:flex-1 sm:overflow-auto ${logOpen ? 'h-32 shrink-0 overflow-auto sm:h-auto' : 'hidden sm:block'}`}
+          data-combat-log>
           {logLines.map((e, i) => (
             <div key={i} className="text-[#a89478]">
               {e.type === 'dmg' && `${charLabel(e.who!)?.name ?? ''} 对 ${enemyName(e.target)} 造成 ${e.value} 伤害`}
@@ -370,7 +394,7 @@ export default function CombatView({ onNavigate }: { onNavigate: (tab: Tab) => v
             脚本的单数定位会一次匹配到两个元素（strict mode 当场红），
             而红的形态是"新手引导坏了"，离真正的原因很远。呼吸灯（`dq-breath`）两端都亮，
             那是纯视觉，不参与定位。 */}
-        <button onClick={() => game.toggleAutoBattle()}
+        <button onClick={() => game.toggleAutoBattle()} data-onb="battle"
           className={`dq-tap-lg flex-1 rounded px-3 text-sm text-black ${state.autoBattle ? 'bg-dq-fire' : 'bg-dq-gold'} ${nbBattle ? 'dq-breath' : ''}`}>
           {state.autoBattle ? '自动出战中（点击停止）' : '开启自动出战'}
         </button>

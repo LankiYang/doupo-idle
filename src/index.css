@@ -438,6 +438,49 @@ body {
   animation: dq-breath 1.5s ease-in-out infinite;
 }
 
+/* ── 剧情正文的入场(v1.55)──────────────────────────────────────────────
+   用户 2026-09-22：「角色人物说话切换这些都要做淡入淡出的一些过渡」。
+   立绘和场景的过渡是 CSS transition（元素一直在，只是换了 src/class），
+   但**正文那两段文字是换内容**，没有"同一个元素的状态变化"可过渡 ——
+   翻到下一幕时，文字会硬切。所以这里给一个入场动画。
+   `key={view}` 让 React 换幕时重建这个 div，动画于是重播一次。
+
+   位移只有 6px：正文一行行往上飘是"页面在动"，不是"这一段刚出现"。
+   淡入 + 一点点上浮就够了，幅度一大就变成特效了。
+   时长 260ms 比场景淡化(620ms)短 —— 文字要**先落定**，读者才不会被还在动的字分心。 */
+@keyframes dq-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.dq-rise {
+  animation: dq-rise 260ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dq-rise { animation: none; }
+}
+
+/* ── 蒙层引导的洞口高亮(v1.58)────────────────────────────────────────────
+   一块压暗的遮罩，只在"当前该点的那一个东西"上挖一个洞（几何见 Onboarding.tsx：
+   四个矩形围出来，不是给目标加 z-index —— 那条路在真实页面上走不通）。
+   这里画的只是**洞口那圈金边**。
+
+   为什么不用现成的 `dq-breath`：那个是**按钮自己在呼吸**（动画加在按钮的 box-shadow 上），
+   而洞口高亮是**蒙层自己的一层浮块**，两者要能同时存在（按钮上本来就有呼吸灯，
+   上面再叠一圈金边）。共用一个 class 的话，改其中一处就会动到另一处。
+
+   ⚠️ 静止态也要看得见（`prefers-reduced-motion` 那一条不能只写 `animation: none`）：
+   一条不动的金边仍然在说"就是这儿"，一片什么都没有的洞就只是"屏幕破了个口子"。 */
+@keyframes dq-onb-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(232,176,74,0.85), 0 0 12px 2px rgba(232,176,74,0.50); }
+  50%      { box-shadow: 0 0 0 7px rgba(232,176,74,0.06), 0 0 26px 8px rgba(232,176,74,0.75); }
+}
+.dq-onb-pulse {
+  animation: dq-onb-pulse 1.5s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dq-onb-pulse { animation: none; box-shadow: 0 0 0 3px rgba(232,176,74,0.45); }
+}
+
 
 /* ── 消消乐盘面(v1.40)────────────────────────────────────────────────────
    盘面从"CSS grid + 每格换图"改成"绝对定位 + transform 过渡"：

@@ -3,7 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- ⚠️ **不许缩放**（v1.59，用户 2026-09-22：「军师页面不是一屏展示的，不要允许缩放」）。
+         那一句其实是同一件事的两面：手机 Safari 在**聚焦字号 <16px 的输入框**时会自动把整页放大，
+         而放大的页面自然"不是一屏"了 —— 军师的输入框原来是 `text-xs`(12px)，必然触发。
+         ⇒ 两手都做：① 这里禁掉手势缩放（`user-scalable=no` + `maximum-scale=1`，安卓还要
+         `minimum-scale=1`，否则双击仍会缩放）；② `AdvisorView` 的输入框提到 16px（见那份文件）。
+         只做①不做②的话，iOS 那条自动放大是**浏览器行为、不走 viewport 配置**，照样会放大。
+         ⚠️ 代价：视障玩家不能再用双指放大读剧情。用户明确要求，照做 —— 而它换来的正好是
+         同一批玩家的另一个体验（"字太小"）已经在 v1.59 里靠**把字号提上去**解决了。
+         `viewport-fit=cover` 是给刘海屏用的：不加的话 `env(safe-area-inset-bottom)` 恒为 0，
+         军师输入区在全面屏手机上会贴着底部手势条。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>doupo-idle</title>
   </head>
   <body>

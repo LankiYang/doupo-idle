@@ -225,6 +225,23 @@ export const CHARACTERS: CharacterDef[] = [
   //    定位是补圣阶的两块空缺：圣阶原本没有单体（single）也没有单体医师（heal）。
   def('hanli', '韩立', 'sheng', 'back', 'single', '凡人修仙传联动 · 一介凡人，步步为营，青竹蜂云剑下从无侥幸'),
   def('yinyue', '银月', 'sheng', 'back', 'heal', '凡人修仙传联动 · 银月狼族，月华入体，只为一人疗伤'),
+
+  // ─ v1.63 联名：燕云十六声（**限时**，见下方 LINK_SEASONS 第二期）─────────────
+  // 三名**全部圣阶**，用户点名的定位：控制 / 坦克 / 法师。
+  // ⚠️ 与凡人那两名同一条规矩：只在活动期内可获取，活动结束后从抽卡池与兑换区一起
+  //    移出（收口在 recruitPoolOf / redeemShard），**但武魂名录里继续留名**——
+  //    玩家原话：「联名结束了只是抽不到和兑换不到了，武魂名录里应该还继续展示」。
+  //    属性照旧由 def() 算出，同品阶同定位与其他角色完全一致 —— 联名不做数值优势。
+  //    定位是补圣阶的空缺：圣阶原本没有坦克（tank）也没有控制（control）。
+  // ★ 江晏：初版是 melee，2026-09-23 用户改成 **control**（原话「把江晏这个角色更新成控制」）。
+  //   改一个词就够 —— 面板由 ROLE_MULT 自动重算，压制机制由引擎按 role 判定，
+  //   两处都不需要为这一个角色开特例（`engine.ts` 的「命中后挂 CONTROL_DEBUFF」只认 role）。
+  //   ⚠️ 代价要知道：control 的 atk 倍率 0.85 vs melee 1.1 ⇒ 他面板攻击降约 23%，
+  //      换来的是每次命中给目标挂攻 -20% / 防 -25%（持续 2 回合、命中即刷新）。
+  //      这是**交换**，不是"顺手调弱"——别在没读懂这层交换之前把它调回 melee 的倍率。
+  def('jiangyan', '江晏', 'sheng', 'front', 'control', '燕云十六声联动 · 玄色斗篷里裹着一线生机，雪夜废墟中也未曾松手'),
+  def('bingshen', '丙申', 'sheng', 'front', 'tank', '燕云十六声联动 · 草笠垂符立于荆棘深处，旧袍磨破了也不退半步'),
+  def('xiaocha', '玄骨上人·萧诧', 'sheng', 'back', 'aoe', '燕云十六声联动 · 玄骨上人，笑谈间魂火成阵，暖灯石室里最冷的那个人'),
 ]
 
 export const ROLE_INFO = ROLE_LABEL
@@ -823,6 +840,135 @@ export function enemyUnitsForFloor(floor: number): EnemyUnit[] {
   return makeEnemyUnits(enemyCompFor(enemyCountForFloor(floor), floorToStageDepth(floor)), base, towerMonsterName(floor), style)
 }
 
+// ── 剧情战斗（v1.55）────────────────────────────────────────────────────
+/**
+ * 剧情战斗的强度规格。**写在 story.ts 的节点上**，由引擎读。
+ *
+ * 为什么剧情战斗要有自己的一套规格（用户 2026-09-22：「战斗你可以剧情的战斗
+ * 不和主线战斗耦合」）：
+ *   · 原先剧情节点直接挂在**主线关卡**上（`stage: 5` = 去打第 5 关）。
+ *     那等于把剧情推进的速度交给玩家的练度 —— 一个把主线推到 60 关的人回来做第一章，
+ *     打「萧家子弟」用的是 60 关的数值；而一个卡在 3 关的人则**永远做不完第一章**。
+ *   · 更糟的是叙事上说不通：第一幕是"萧炎还是个三段的废物、被族人按在地上打"，
+ *     而战斗用的是他一路练到 60 关的那支队。
+ *
+ * 解耦之后：剧情战斗的数值只看 `power`（一个编剧能直接写的档位），
+ * **与玩家的主线进度、farmStage、连败计数一概无关**，胜负也不写回主线那套
+ * （不掉关卡、不加 kill、不进 wipeStreak）。
+ */
+export interface StoryCombatSpec {
+  /** 敌人名字。会进战报与敌方名牌，写成剧情里那个人（「萧家子弟」而不是「第 3 关的怪」） */
+  name: string
+  /**
+   * 强度锚点：**取主线第几关的数值基线**（复用 `stageStats`，不另开一套成长曲线）。
+   * 编剧只需要知道"这一场大概相当于第几关的强度"，不用碰任何数值公式。
+   */
+  power: number
+  /** 人数 1~6。构成由 `enemyCompFor` 按 depth 推，与主线同一套规则 */
+  count: number
+  atkStyle?: AtkStyle
+  /**
+   * 用哪张怪物立绘（`sprites/monsters/` 的 id）。不传 = 没有立绘，战斗界面画一团地光顶替。
+   *
+   * ⚠️ 这一条**必须落在节点上**（`story.ts` 的 `combat.sprite`），不能在战斗界面按名字反查：
+   *    "萧家子弟"和主线某关的怪可能重名，反查出来的图会让剧情里打的是另一批人。
+   *    现成可用的：`family_disciple`（萧家子弟）/ `yunlan_elder` / `thug`（黑市打手）/
+   *    `prince_guard`（吴家护卫）。完整清单见该目录。
+   */
+  sprite?: string
+}
+
+/** 剧情战斗的敌方阵容 */
+export function enemyUnitsForStory(spec: StoryCombatSpec): EnemyUnit[] {
+  const base = stageStats(spec.power)
+  return makeEnemyUnits(enemyCompFor(spec.count, spec.power), base, spec.name, spec.atkStyle ?? 'melee')
+}
+
+/**
+ * 剧情战斗的**目标回合数**（v1.55d）。
+ *
+ * 用户 2026-09-22：「战斗过程都没有，战斗都没有动画就结束了，注意数值」。
+ *
+ * 为什么需要这个数：敌人的基准数值来自 `stageStats(node.combat.power)`，那是**主线第 N 关**
+ * 的怪（本作四个战斗格 power = 2/5/8/14 ⇒ 血 53/70/92/160、防 0~3）。而这套数值对
+ * **已经推过主线的号**是离谱地低 —— 主线 130 关的玩家，单体攻击力是五位数起步，
+ * 而伤害公式是 `max(1, atk − def×0.6)`（见 `fightRound`）⇒ **一刀就是几百倍于敌人总血**。
+ * 于是 `onWaveClear` 在第一回合就触发、`storyOnWin` 立刻把 `storyBattle` 清掉，
+ * 玩家看到的是「点开战 → 静止两秒（`ROUND_SEC`）→ 已经站在地图上了」。
+ * 一句话：**这一屏在成型的号上等于不存在**，而剧情恰恰是老玩家回头才补的东西。
+ *
+ * 取 4 的依据：`ROUND_SEC = 2`、一回合内各角色按 `SEQ_MS = 220` 依次出手 ⇒
+ * 4 回合 ≈ 8 秒，够看清"谁打谁、掉了多少"，又不至于让回看剧情的人等得不耐烦。
+ * 这个数改了要同步看 `STORY_ENEMY_HP_BUDGET`（下面那条注释解释了为什么）。
+ */
+export const STORY_TARGET_ROUNDS = 4
+
+/**
+ * 敌人四个回合里**总共**打掉我方多少血（v1.55d）。
+ *
+ * 光把敌人血量撑起来只解决了一半 —— 基准 atk 同样低得离谱（power 14 的怪也才 13），
+ * 打在高练度角色身上会被 `max(1, …)` 夹到 **1 点**：对面掉血、我方血条纹丝不动，
+ * 读起来还是"没有过程"。所以攻击也要跟着放大。
+ *
+ * 取 0.30：血条每回合都肉眼可见地动（战术上"挨打了"），但**四个回合下来打不死人**。
+ * 剧情战斗输了不掉任何东西、可以无限重来，但让玩家在看戏的路上先打输一次，是纯粹的打扰。
+ */
+export const STORY_ENEMY_HP_BUDGET = 0.30
+
+/**
+ * 敌人**单次**出手打掉我方单人多少血（按单人平均血量的比例，v1.55d）。
+ *
+ * 这是给上面那个总预算兜底的上限：伤害是**逐个结算**的（`pickFighters` 挑目标），
+ * 不是均匀分摊到每个人头上。运气差的时候同一个角色会连着挨打，只算总预算的话，
+ * 总账没超、人先没了。0.10 ⇒ 最坏情况（每回合被两个敌人盯上、四个回合）也才 4×2×0.10 = 80% 血，
+ * 仍然死不了。
+ */
+const STORY_ENEMY_HIT_CAP = 0.10
+
+/**
+ * 把剧情战斗的敌人**按我方阵容重新定标**（v1.55d）。原地改 `enemies`。
+ *
+ * ── 基准为什么从**敌人自己身上读**，而不是再算一遍 `stageStats(power)` ──────
+ * 第一版就是自己算的，结果低练阵容**直接打不过**：`stageStats(5)` 因为 5 是 5 的倍数
+ * 被判成 Boss 关、一刀乘 1.6（hp 70 → 113），而 `enemyUnitsForStory` 那边实际用的是
+ * `enemyCompFor` 算出来的 48。于是"下限"反而比真实基准高了一倍多。
+ * 教训与红线里那条一样：**同一件事不许有两份实现** —— 基准值已经算好挂在 `maxHp` / `atk` 上了，
+ * 这里只该拿来用。
+ *
+ * 传入的是**已经算好的我方四项合计**（由 `engine.startStoryBattle` 用 `mainFighterStats`
+ * 求和后给），而不是一个 `(id) => stats` 的查表函数 —— 后者会让这个纯数值函数反过来
+ * 依赖引擎的羁绊/装备口径，那正是"两份实现"的入口。
+ *
+ * ⚠️ 血量的 `Math.max` 是**保留下限**：阵容的输出弱到打不动基准敌人时（比如 1-15 对新手），
+ *    仍然用基准值。也就是说这一改**只抬高、从不压低**，新手那一侧的手感分毫未动。
+ */
+export function scaleStoryEnemiesForParty(
+  enemies: EnemyUnit[],
+  party: { atk: number; hp: number; defAvg: number; count: number },
+): void {
+  const n = enemies.length
+  if (n === 0) return
+  const hpBase = enemies[0].maxHp
+  const atkBase = enemies[0].atk
+
+  // 血量：让全员一轮的裸攻击正好打掉 `1 / STORY_TARGET_ROUNDS`。
+  // ×0.9 是给暴击与 ±15% 的随机波动留余量 —— 不留的话算出来是 4 回合、实际打 3 回合。
+  const hpEach = Math.max(hpBase, Math.round((party.atk * STORY_TARGET_ROUNDS * 0.9) / n))
+
+  // 攻击：伤害公式是 `max(1, atk − def×0.6)`，所以先把防御那一份加回去，
+  // 算出来的才是"能打出预期伤害"的 atk（不然高防阵容会把伤害整个吃掉，每回合掉 1 点）。
+  const defPart = party.defAvg * 0.6
+  const perRoundBudget = (party.hp * STORY_ENEMY_HP_BUDGET) / STORY_TARGET_ROUNDS / n
+  const perHitCap = (party.hp / Math.max(1, party.count)) * STORY_ENEMY_HIT_CAP
+  const atkEach = Math.max(atkBase, Math.round(Math.min(perRoundBudget, perHitCap) + defPart))
+
+  for (const e of enemies) {
+    e.maxHp = hpEach
+    e.hp = hpEach
+    e.atk = atkEach
+  }
+}
+
 // ── 阵营羁绊（v1.28）───────────────────────────────────────────────────────
 /**
  * 阵营与羁绊：上阵的同阵营角色达到人数阈值，就给**全队**加成（取自走棋的羁绊玩法）。
@@ -839,7 +985,7 @@ export function enemyUnitsForFloor(floor: number): EnemyUnit[] {
 export type FactionId =
   | 'yunlan' | 'xiao' | 'jiama' | 'moshou' | 'gu'
   | 'long' | 'hundian' | 'fenyangu' | 'danta' | 'sanxiu'
-  | 'fanren'
+  | 'fanren' | 'yanyun'
 
 export interface FactionTier {
   /** 需要几名同阵营角色同时上阵才触发 */
@@ -937,10 +1083,21 @@ export const FACTIONS: Record<FactionId, FactionDef> = {
       { count: 6, atk: 14, def: 14, hp: 14, desc: '全体攻击/防御/气血 +14%' },
     ],
   },
-  // 联动阵营（v1.41）：只有两名成员，所以**只有 2 人档**——两名人都在队里才生效。
-  // 加成给到 8%（与散修 5 人档同值）：门槛是"两个位子都给联动角色"，条件比任何阵营都硬。
+  // 联名阵营（v1.41）：两名成员 → **2 人档**；加成 8%（与散修 5 人档同值）：
+  // 门槛是"两个位子都给联动角色"，条件比任何阵营都硬。
+  // v1.63 起第三名联名角色萧诧也归这里（3 人档），见下方 LINK_SEASONS 第二期。
   fanren: {
     id: 'fanren', name: '凡人修仙', color: '#5eead4', motto: '步步为营',
+    tiers: [
+      { count: 2, atk: 8, hp: 8, desc: '全体攻击/气血 +8%' },
+      { count: 3, atk: 16, hp: 16, desc: '全体攻击/气血 +16%' },
+    ],
+  },
+  // 联名阵营（v1.63）：燕云十六声。两名成员 → 只有 2 人档，数值与凡人同档
+  // （同样是"两个位子都给联名角色"的硬门槛，不给联名做数值优势）。
+  // ⚠️ 它和凡人一样是**癞子阵营**，但两者**一次只能有一个生效**（见 WILDCARD_FACTIONS）。
+  yanyun: {
+    id: 'yanyun', name: '燕云', color: '#d9b45b', motto: '同袍同泽',
     tiers: [
       { count: 2, atk: 8, hp: 8, desc: '全体攻击/气血 +8%' },
     ],
@@ -979,8 +1136,10 @@ export const FACTION_OF: Record<string, FactionId> = {
   yellow_bandit: 'sanxiu', luoxuan: 'sanxiu', wuang: 'sanxiu', zhayi: 'sanxiu',
   linmeiniang: 'sanxiu', yuntianhe: 'sanxiu', tuoshe: 'sanxiu', linxiuya: 'sanxiu',
   liuling: 'sanxiu', wuhao: 'sanxiu', tieyan: 'sanxiu', desert_escort: 'sanxiu',
-  // 凡人修仙（v1.41 联动）：自成一派，两名都上阵才触发羁绊
-  hanli: 'fanren', yinyue: 'fanren',
+  // 凡人修仙（v1.41 联动）：自成一派；v1.63 起第三名联名角色萧诧也归这里
+  hanli: 'fanren', yinyue: 'fanren', xiaocha: 'fanren',
+  // 燕云（v1.63 联名）：江晏、丙申两名
+  jiangyan: 'yanyun', bingshen: 'yanyun',
 }
 
 /** 已上阵的某个阵营：人数与当前生效的档位（未达最低档时 tier 为 null） */
@@ -989,7 +1148,7 @@ export interface ActiveBond {
   /** 计入档位的**有效人数**（含被凡人癞子补上的部分，见 `fromWild`） */
   count: number
   tier: FactionTier | null
-  /** 上面那个 count 里有多少个是凡人替它凑的（v1.47 癞子）。0 = 这个阵营没吃到补位 */
+  /** 上面那个 count 里有多少个是癞子替它凑的（v1.47）。0 = 这个阵营没吃到补位 */
   fromWild: number
 }
 
@@ -1001,26 +1160,41 @@ export interface BondBonuses {
   crit: number
   /** 全部有上阵成员的阵营（含未激活的），供界面展示"还差几个" */
   active: ActiveBond[]
-  /** 凡人癞子这次补给了哪个阵营（没补 / 场上没凡人时为 null）。界面用它说清"+N 是凡人凑的" */
+  /** 这一次补给了哪个阵营（没补 / 场上没癞子时为 null）。界面用它说清"+N 是补上的" */
   wildcardHost: FactionId | null
+  /** 是**哪个**癞子阵营补的（与 wildcardHost 同生共死）。界面用它写"凡人凑的"/"燕云凑的" */
+  wildcardFrom: FactionId | null
+  /**
+   * 场上有、但**这一次没拿到补位权**的另一个癞子阵营（v1.63：燕云与凡人不叠加）。
+   * 界面拿它说一句"两者只生效其一" —— 不说的话玩家会以为加成漏算了。
+   */
+  wildcardIdle: FactionId | null
 }
 
 /**
- * 凡人修仙（v1.47）：**癞子阵营**。
+ * 癞子阵营：成员不只能凑自己那 2 人档，还能**替一个别的阵营补人数** ——
+ * 玩家原话「有点像斗地主的癞子」（v1.47 凡人；v1.63 起燕云也具备这个能力，
+ * 用户原话：「这两个角色属于燕云阵营，**也和凡人一样**能和其他阵营组队」）。
  *
- * 它的成员不只能凑自己那 2 人档，还能**替一个别的阵营补人数** —— 玩家原话
- * 「有点像斗地主的癞子」。补的对象是**当前人数最多的那个非凡人阵营**，
- * 自动选、不给玩家挑：想让凡人补谁，就把谁凑成场上人最多的那个。
+ * 补的对象是**当前人数最多的那个非癞子阵营**，自动选、不给玩家挑：
+ * 想让癞子补谁，就把谁凑成场上人最多的那个。
  *
- * ⚠️ 比较"谁人最多"时**不把凡人自己算进去**。2 凡人 + 2 萧家时两者并列，
- *    把凡人纳入比较会退化成一个没有答案的平局。**先在同一条船上比（非凡人之间），
+ * ⚠️ 比较"谁人最多"时**不把癞子自己算进去**。2 凡人 + 2 萧家时两者并列，
+ *    把凡人纳入比较会退化成一个没有答案的平局。**先在同一条船上比（非癞子之间），
  *    再补** —— 这样每个阵容都有唯一确定的解释。并列时取 `FACTIONS` 里声明在前的，
  *    声明顺序本身就是规则。
  *
+ * ⚠️ **两个癞子同时在场时只有一个能补位**（用户原话：「但不能和凡人叠加」）。
+ *    若两边都补，一个 2 人阵营能凭"2 真实 + 2 癞子"直接吃满最高档 —— 那等于把
+ *    "凑阵营"这件事整个作废。规则是选**自身人数多的那个**当补位者，
+ *    并列时取本数组**声明在前的**（凡人），所以任何一套阵容的解释都是唯一的。
+ *    ⚠️ 这条是**决定函数**，别为了"看起来更慷慨"把它简化成两个都补：
+ *    `temp/verify-link-yanyun.cjs` 里有反向闸专门钉住它。
+ *
  * ⚠️ 这是**纯计算**：不入存档、不新增字段，所以没有任何迁移。
- *    代价是"凡人补给了谁"每次都由当场阵容重算 —— 换阵容时它自己会变，这正是想要的。
+ *    代价是"谁补给了谁"每次都由当场阵容重算 —— 换阵容时它自己会变，这正是想要的。
  */
-export const WILDCARD_FACTION: FactionId = 'fanren'
+export const WILDCARD_FACTIONS: FactionId[] = ['fanren', 'yanyun']
 
 /**
  * 统计一套阵容的羁绊加成。传的是**上阵角色 id 列表**（空位不算人）。
@@ -1034,13 +1208,21 @@ export function bondBonusesFor(ids: (string | null)[]): BondBonuses {
     if (f) count[f] = (count[f] ?? 0) + 1
   }
 
-  // 癞子：先收拢凡人的人数，再决定补给谁。全凡人 / 空阵容 ⇒ host 为 null ⇒ 谁也不补。
-  const wild = count[WILDCARD_FACTION] ?? 0
+  // 癞子：**先选出唯一的补位者**（自身人数多的胜，并列取声明在前的），再决定它补给谁。
+  // 场上没癞子 ⇒ 两个变量都是 null ⇒ 谁也不补。
+  let from: FactionId | null = null
+  let fromN = 0
+  for (const w of WILDCARD_FACTIONS) {
+    const n = count[w] ?? 0
+    if (n <= 0) continue
+    // 必须**严格大于**才换人 ⇒ 并列时保留下标靠前的那个（= 声明在前），规则唯一
+    if (from === null || n > fromN) { from = w; fromN = n }
+  }
   let host: FactionId | null = null
   let hostN = 0
-  if (wild > 0) {
+  if (from) {
     for (const def of Object.values(FACTIONS)) {
-      if (def.id === WILDCARD_FACTION) continue
+      if (WILDCARD_FACTIONS.includes(def.id)) continue
       const n = count[def.id] ?? 0
       // 必须**严格大于**才换人 ⇒ 首次出现的那个被保留 ⇒ 并列时取声明在前的
       if (n <= 0 || n <= hostN) continue
@@ -1048,14 +1230,19 @@ export function bondBonusesFor(ids: (string | null)[]): BondBonuses {
       hostN = n
     }
   }
+  // 场上有、但这次**没拿到补位权**的那个癞子。界面上要说一句，否则玩家会以为加成漏算了
+  const idle = WILDCARD_FACTIONS.find(w => w !== from && (count[w] ?? 0) > 0) ?? null
 
-  const out: BondBonuses = { atkPct: 0, defPct: 0, hpPct: 0, crit: 0, active: [], wildcardHost: host }
+  const out: BondBonuses = {
+    atkPct: 0, defPct: 0, hpPct: 0, crit: 0, active: [],
+    wildcardHost: host, wildcardFrom: from, wildcardIdle: idle,
+  }
   for (const def of Object.values(FACTIONS)) {
     const own = count[def.id] ?? 0
     if (own <= 0) continue
-    // 凡人自己按**实际人数**算档（补位是它给别人的能力，不给自家加人）；
-    // 它补的那个阵营按「实际 + 凡人人数」算，于是可能直接跳档。
-    const fromWild = def.id === host ? wild : 0
+    // 癞子自己按**实际人数**算档（补位是它给别人的能力，不给自家加人）；
+    // 它补的那个阵营按「实际 + 补位者人数」算，于是可能直接跳档。
+    const fromWild = def.id === host ? fromN : 0
     const n = own + fromWild
     const tier = [...def.tiers].reverse().find(t => n >= t.count) ?? null
     out.active.push({ faction: def, count: n, tier, fromWild })
@@ -1203,43 +1390,122 @@ export const SHARD_COST: Record<Rarity, number> = {
   yellow: 2, xuan: 4, di: 8, tian: 16, quasi: 30, sheng: 60,
 }
 
-// ── 限时联动（v1.41 · 凡人修仙传）─────────────────────────────────────────
+// ── 限时联动（v1.41 起 · **按期管理**，v1.63 改成多期）─────────────────────
 /**
- * 活动期内这两名武魂进抽卡池、可兑换；**结束后从这两处一起移出**（已拥有的永久保留）。
+ * 一次限时联名 = 一个 `LinkSeason`：几名角色 + 一个绝对时间窗。
+ *
+ * 规则（每一期都一样）：
+ *   · 活动期内这几名武魂进抽卡池、可兑换，兑换价固定 `LINK_SHARD_COST`；
+ *   · 活动结束后从**抽卡池与兑换区**一起移出，已拥有的永久保留；
+ *   · **武魂名录（图鉴）里任何时候都继续留名** —— 玩家原话：
+ *     「联名结束了只是抽不到和兑换不到了，武魂名录里应该还继续展示」。
+ *
+ * ⚠️ 判定必须按「**这名角色自己那一期**是不是开着」，不能按「有没有活动在进行」（v1.63 改）。
+ *    原来只有一个全局的 `LINK_START_MS` + `linkActive()`：那种写法在第二期开起来时会
+ *    把**上一期已经结束的角色一起放回池子**（`linkActive()` 为真 ⇒ 所有联动角色都算可获取）。
+ *    现在收口到 `linkGettable(id)` 一个函数，池子、兑换、界面全部走它。
  *
  * ⚠️ 时间窗是**全服统一的绝对时刻**，不是"每个玩家各自的 24 小时"：公告上要写得出一个
- *    确定的截止时间，全服才在同一件事上。改期只改 `LINK_START_MS` 一行。
+ *    确定的截止时间，全服才在同一件事上。
  *
  * ⚠️ 判定读的是**客户端时钟**（`Date.now()`）。本项目没有"服务端下发时间"的通道，
  *    而抽卡本来就是纯客户端的（缘分丹与保底都在本地存档里）。把手机时间调回活动期的人
  *    能继续抽到联动角色 —— 已知并接受：这是单机放置游戏，他得自己改系统时间；
  *    要堵这个口就得把抽卡搬到服务端，代价远大于收益。
  */
-export const LINK_CHAR_IDS = ['hanli', 'yinyue']
+export interface LinkSeason {
+  /** 期次标识。**会被写进本地存储**（"这一期海报弹过了"），改动它等于让所有人都重看一次海报 */
+  id: string
+  /** 联名对象的名字：横幅与海报浮层上写的就是它 */
+  title: string
+  /** 这一期进池的武魂 */
+  charIds: string[]
+  /** 起始时刻（毫秒时间戳）。`<= 0` 视为"未定档"，整期都不生效（方便先加数据、后定时间） */
+  startMs: number
+  /** 时长。用户点名的「限时时间24h」 */
+  durationMs: number
+  /** 招募页横幅 / 海报浮层上那句"谁加入了招募" */
+  tagline: string
+  /** 海报浮层底部的一句补充说明，每期可以不一样 */
+  note: string
+}
+
+/** 一期 24 小时。只是当前各期的取值，不是"每期都必须 24h"的硬规定 */
+const LINK_24H = 24 * 3600 * 1000
+
+/**
+ * 全部联名期次。
+ *
+ * ⚠️ **历史期一并不许删**：`isLinkChar` / `shardCostOf` / 图鉴上的「联动」角标都靠它认人 ——
+ *    删掉第一期，韩立与银月会当场失去"联动角色"身份（兑换价从 100 掉回 60、角标消失）。
+ *    期次是"这名角色属于哪次联名"的**永久身份**，不是"现在开不开"的状态。
+ */
+export const LINK_SEASONS: LinkSeason[] = [
+  {
+    id: 'fanren',
+    title: '凡人修仙传',
+    charIds: ['hanli', 'yinyue'],
+    // 2026-09-20 02:00 (UTC+8) —— **联名返场**：首期（09-18 01:00 ~ 09-19 01:00）结束后，
+    // 韩立立绘与联名海报重画了一版（首期那句 "unremarkable ordinary looks" 是照原著
+    // "平平无奇"写的，玩家反馈不好看），并把活动**原样再开 24 小时**让没赶上的玩家补上。
+    // 结束时刻 = 2026-09-21 02:00 (UTC+8)，公告里写的就是这个绝对时刻。
+    startMs: Date.UTC(2026, 8, 19, 18, 0),
+    durationMs: LINK_24H,
+    tagline: '韩立 / 银月 加入招募（圣阶）',
+    note: '两名圣阶武魂 · 活动期 24 小时 · 结束后移出抽卡池与兑换',
+  },
+  {
+    id: 'yanyun',
+    title: '燕云十六声',
+    charIds: ['jiangyan', 'bingshen', 'xiaocha'],
+    // 2026-09-23 10:30 ~ 2026-09-24 10:30 (UTC+8)。公告与海报上写的都是这两个绝对时刻。
+    startMs: Date.UTC(2026, 8, 23, 2, 30),
+    durationMs: LINK_24H,
+    tagline: '江晏 / 丙申 / 萧诧 加入招募（圣阶）',
+    note: '三名圣阶武魂 · 活动期 24 小时 · 结束后移出抽卡池与兑换，武魂名录继续展示',
+  },
+]
+
 /** 联动兑换价：**固定 100 枚**（不随品阶走），用户点名的数字。 */
 export const LINK_SHARD_COST = 100
-/** 活动起始时刻（毫秒时间戳）。**部署上线时写入**；`<= 0` 视为"未开活动"。 */
-// 2026-09-20 02:00 (UTC+8) —— **联名返场**：首期（09-18 01:00 ~ 09-19 01:00）结束后，
-// 韩立立绘与联名海报重画了一版（首期那句 "unremarkable ordinary looks" 是照原著
-// "平平无奇"写的，玩家反馈不好看），并把活动**原样再开 24 小时**让没赶上的玩家补上。
-// 结束时刻 = 2026-09-21 02:00 (UTC+8)，公告里写的就是这个绝对时刻。
-export const LINK_START_MS = Date.UTC(2026, 8, 19, 18, 0) // 2026-09-20 02:00 (UTC+8)
-/** 活动时长：24 小时 */
-export const LINK_DURATION_MS = 24 * 3600 * 1000
 
-export function linkEndMs(): number { return LINK_START_MS + LINK_DURATION_MS }
-/** 活动是否进行中。`now` 可注入 —— 测试要能把时钟拨到活动前 / 活动后（界面一律用默认值）。 */
-export function linkActive(now: number = Date.now()): boolean {
-  return LINK_START_MS > 0 && now >= LINK_START_MS && now < linkEndMs()
+/** 这名角色属于哪一期联名（不是联动角色 ⇒ null）。**历史期也算"属于"**，见 LINK_SEASONS 的说明 */
+export function linkSeasonOf(id: string): LinkSeason | null {
+  return LINK_SEASONS.find(s => s.charIds.includes(id)) ?? null
 }
 export function isLinkChar(id: string): boolean {
-  return LINK_CHAR_IDS.includes(id)
+  return linkSeasonOf(id) !== null
 }
-/** 剩余时间（活动未开始或已结束时为 0） */
+/** 这一期的结束时刻 */
+export function seasonEndMs(s: LinkSeason): number { return s.startMs + s.durationMs }
+/** 某一期**此刻**是否进行中。`now` 可注入 —— 判据要能把时钟拨到活动前 / 活动后 */
+export function seasonActive(s: LinkSeason, now: number = Date.now()): boolean {
+  return s.startMs > 0 && now >= s.startMs && now < seasonEndMs(s)
+}
+/** 正在进行的那一期（没有则 null）。界面拿它渲染横幅、倒计时与海报浮层 */
+export function activeLinkSeason(now: number = Date.now()): LinkSeason | null {
+  return LINK_SEASONS.find(s => seasonActive(s, now)) ?? null
+}
+/** 现在有没有任何一期在进行中 */
+export function linkActive(now: number = Date.now()): boolean {
+  return activeLinkSeason(now) !== null
+}
+/**
+ * 这名武魂**此刻能否通过抽卡 / 兑换拿到**（非联动角色恒为 true）。
+ *
+ * ★ 所有"能不能获得"的判定都必须走这里，别再自己写 `isLinkChar(x) && linkActive()` ——
+ *   那个写法在第二期开起来时会把上一期已经结束的角色一起放回池子。
+ */
+export function linkGettable(id: string, now: number = Date.now()): boolean {
+  const s = linkSeasonOf(id)
+  return !s || seasonActive(s, now)
+}
+/** 剩余时间（没有进行中的活动时为 0） */
 export function linkRemainMs(now: number = Date.now()): number {
   // 只在活动期内给正数：活动还没开始时按「结束时刻 - 现在」算会得到 24 小时出头，
   // 调用方拿它做倒计时就会显示成"活动已开、还剩 24 小时"，是个会骗人的数。
-  return linkActive(now) ? Math.max(0, linkEndMs() - now) : 0
+  const s = activeLinkSeason(now)
+  return s ? Math.max(0, seasonEndMs(s) - now) : 0
 }
 /**
  * 兑换价：联动角色固定 100 枚，其余按品阶。
@@ -1249,22 +1515,27 @@ export function shardCostOf(c: CharacterDef): number {
   return isLinkChar(c.id) ? LINK_SHARD_COST : SHARD_COST[c.rarity]
 }
 /**
- * 某个品阶**当前**的抽卡池。联动角色只在活动期内进池子。
+ * 某个品阶**当前**的抽卡池。联动角色只在**自己那一期**的窗口内进池子。
  * 抽卡一律走这里、不要自己 `CHARACTERS.filter` —— 那是"活动结束后还能抽到联动角色"的唯一来源。
  */
 export function recruitPoolOf(rarity: Rarity, now: number = Date.now()): CharacterDef[] {
-  const active = linkActive(now)
-  return CHARACTERS.filter(c => c.rarity === rarity && (active || !isLinkChar(c.id)))
+  return CHARACTERS.filter(c => c.rarity === rarity && linkGettable(c.id, now))
 }
 /**
  * 联动角色**未拥有、且当前拿不到**时给玩家看的那句话。
- * 分两种措辞是因为"活动开始前"说"已结束"是假话 —— 图鉴里随时能点到这两张卡，
+ *
+ * 分两种措辞是因为"活动开始前"说"已结束"是假话 —— 图鉴里随时能点到这些卡，
  * 而活动前后都是拿不到的（红线⑩：给玩家的话必须如实）。
+ *
+ * v1.63 起**按这名角色自己那一期**取词：第二期开着的时候点开韩立，
+ * 说的应该是"凡人修仙传联动已结束"，而不是笼统的"限时联动已结束"。
  */
-export function linkClosedText(now: number = Date.now()): string {
-  return now < LINK_START_MS
-    ? '限时联动尚未开启 · 这名武魂暂不可获得'
-    : '限时联动已结束 · 这名武魂暂不可获得'
+export function linkClosedText(id: string, now: number = Date.now()): string {
+  const s = linkSeasonOf(id)
+  if (!s) return '这名武魂暂不可获得'
+  return now < s.startMs
+    ? `${s.title}联动尚未开启 · 这名武魂暂不可获得`
+    : `${s.title}联动已结束 · 这名武魂暂不可获得`
 }
 
 // ─ 抽卡保底：三层，抽到「该层或更高」即重置该层计数 ──────────────────────
