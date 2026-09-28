@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import Header from './components/Header'
 import RosterView from './components/RosterView'
 import CombatView from './components/CombatView'
@@ -17,13 +17,14 @@ import { buffSprite } from './game/icons'
 import WorldBossTab, { WB2_TAB_ON } from './components/WorldBossTab'
 import ActivityView from './components/ActivityView'
 import Advisor from './components/AdvisorView'
+const FishingView = lazy(() => import('./components/FishingView'))
 import { useGame, game } from './game/engine'
 import { SHOP_BUFFS } from './game/data'
 import { startCloudSync } from './game/saveApi'
 import { startWorldBossSync } from './game/worldboss'
 import { startWorldBoss2Sync } from './game/worldboss2'
 
-export type Tab = 'story' | 'roster' | 'combat' | 'boss' | 'activity' | 'recruit' | 'shop' | 'lab' | 'equipment' | 'leaderboard' | 'save'
+export type Tab = 'story' | 'roster' | 'combat' | 'boss' | 'fishing' | 'activity' | 'recruit' | 'shop' | 'lab' | 'equipment' | 'leaderboard' | 'save'
 
 /**
  * 顺序即优先级。**战斗排第一**（v1.32）：这是个挂机游戏，战斗页是主屏——
@@ -60,6 +61,7 @@ const TABS_ALL: { id: Tab; label: string }[] = [
   // 世界 Boss 的合并入口：里面是「集结讨伐」+「连线讨伐」两个子页签。
   // 标签**按玩法大类命名**、不按 Boss 名字 —— Boss 名字还在改，玩法不会变。
   { id: 'boss', label: '世界boss' },
+  { id: 'fishing', label: '灵潭' },
   { id: 'activity', label: '活动' },
   { id: 'recruit', label: '招募' },
   { id: 'shop', label: '商城' },
@@ -223,6 +225,7 @@ export default function App() {
           之所以有这个中间层，是为了让顶层页签只有「世界boss」一个，
           而子页签清单又不落进本文件（理由见上面 TABS_ALL 的注释）。 */}
       {tab === 'boss' && <WorldBossTab />}
+      {tab === 'fishing' && <Suspense fallback={<div className="flex flex-1 items-center justify-center text-sm text-dq-gold">灵潭加载中…</div>}><FishingView /></Suspense>}
       {tab === 'activity' && <ActivityView />}
       {tab === 'recruit' && <RecruitView />}
       {tab === 'shop' && <ShopView />}

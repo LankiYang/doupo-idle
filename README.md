@@ -21,10 +21,31 @@ npm run build -- --base=/doupo/    # 生产构建（必须带 --base，否则子
 src/game/        引擎与数据：engine.ts（状态机 + tick + 战斗 + 抽卡 + 存档）
                  data.ts（全部静态数值）/ saveApi.ts、leaderboardApi.ts（后端客户端）
                  rewards.ts（运营奖励取用）
-src/components/  8 个页签的界面
+                 fishingModel.ts、fishingScene.ts（灵潭试钓状态和场景）
+                 fishingSpecies.ts、fishingEconomy.ts（鱼讯概率与试营业经济）
+src/components/  各页签界面；FishingView.tsx、FishingPanels.tsx 为灵潭入口和面板
 server/          后端（群雄榜 + 云存档），零依赖 Node http
 design/          数值设计文档（各系统的定数推导与版本记录）
 ```
+
+## 灵潭试钓
+
+在游戏内打开「灵潭」：点击岸边移动或选择钓位，抵达后抛竿；鱼讯出现时扬竿，按住收线并适时松开以控制张力。键盘可用方向键/WASD 移动，空格扬竿或收线。渔具面板可切换男修/女修、购买和装备鱼竿鱼饵，并查看当前鱼讯和品质概率。钓获进入 24 格鱼获背包，可上锁、单独或批量出售换鱼券；银鳞鱼 × 2 + 赤纹鲈 × 1 还可兑换月光虫 × 3。
+
+目前仍是**单人本地试营业**：鱼券、鱼获、渔具和人物选择只存于当前浏览器标签页的 `sessionStorage`（`doupo.fishing.trial.v1`），同标签刷新可恢复，关闭标签、清除站点数据或版本迁移可能清空。它们不进入主游戏存档、云档或灵金，也没有实时玩家、服务端占位或可兑主游戏奖励。不要把客户端试营业账本用于正式交易。多人权威态和部署前置条件见 `design/公屏钓鱼规范.md`。
+
+场景资源在 `src/assets/sprites/fishing/`。男女角色的四向行走使用参考图生成的八帧步态（侧向有摆臂和跨步）；停步使用无竿站姿，占位后切换单独生图的持竿待机、后引、前抛、收线姿势。西向持竿镜像东向，北向有独立背影。人物与竿身不由 Canvas 绘制。五种鱼各用八帧定轴摆尾，水中往返翻面；鱼获有水花、鱼跃和品质提示。保留在 `design/sprite-sources/fishing/` 的审批源图可重建角色图集：
+
+```bash
+node sprite-actor-atlas.cjs walk design/sprite-sources/fishing/male-south-walk-swing.png design/sprite-sources/fishing/male-north-walk-swing.png design/sprite-sources/fishing/male-east-walk-raw.png src/assets/sprites/fishing/avatar-male-walk-v2.png
+node sprite-actor-atlas.cjs walk design/sprite-sources/fishing/female-south-walk-swing.png design/sprite-sources/fishing/female-north-walk-swing.png design/sprite-sources/fishing/female-east-walk-raw.png src/assets/sprites/fishing/avatar-female-walk-v2.png
+node sprite-actor-atlas.cjs actions design/sprite-sources/fishing/male-east-actions-raw.png design/sprite-sources/fishing/male-north-actions-v2-raw.png src/assets/sprites/fishing/avatar-male-fish-actions.png
+node sprite-actor-atlas.cjs actions design/sprite-sources/fishing/female-east-actions-raw.png design/sprite-sources/fishing/female-north-actions-raw.png src/assets/sprites/fishing/avatar-female-fish-actions.png
+npm run test:art
+npm run test:fishing
+```
+
+鱼的母图与对应的 `-tail.png` 图集同目录；重建时按 `design/精灵图动画规范.md` 为每条鱼指定尾柄切线和枢轴，生成的 `-sheet.png` 用作运行时图集。柳枝和鱼使用独立透明层；运行时无需生图服务。线上活后端及接口规范不在这个仓库，`server/server.js` 不是可直接部署的权威版本。
 
 ## 运营：发放奖励
 
@@ -57,4 +78,6 @@ design/          数值设计文档（各系统的定数推导与版本记录）
 | SPEC | 部署根 `SPEC.md` | 部署架构、模块职责、接口、运行约束与**已知坑**（改代码前必看） |
 | 运营手册·发放奖励 | 部署根 `运营手册-发放奖励.md` | 命令速查、幂等/新号/限时语义、出问题怎么办 |
 | 数值设计 | `design/数值设计.md` | 各系统的定数推导与版本记录 |
+| 精灵图动画规范 | `design/精灵图动画规范.md` | 参考图生图、分帧质检与运行时约束 |
+| 公屏钓鱼规范 | `design/公屏钓鱼规范.md` | 试钓边界、实时房间权威协议与验收闸门 |
 | **防作弊开发规范** | `design/防作弊开发规范.md` | **做任何带数字 / 带榜 / 带奖 / 带进度的新功能前必看**：四层防御、写接口只认身份、权威态只读取用、不变量两处 clamp、列举点清单、验证的负对照要求 |

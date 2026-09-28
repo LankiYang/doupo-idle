@@ -50,6 +50,9 @@ src/assets/sprites/generated/
 src/assets/sprites/src/
 src/assets/sprites/link/poster-v*.png
 
+# 本地生图与处理过程中的临时素材，不属于运行时资源或设计源稿。
+temp/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

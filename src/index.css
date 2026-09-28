@@ -1036,3 +1036,17 @@ body {
   html .sm\:text-xs       { font-size: 14px; line-height: 1.45; }
   html .dq-chip { font-size: 12.5px; }
 }
+@keyframes fishing-catch-reveal {
+  from { opacity: 0; transform: translate(-50%, 18px) scale(0.78); }
+  65% { opacity: 1; transform: translate(-50%, -6px) scale(1.06); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+
+.fishing-catch-banner {
+  transform: translateX(-50%);
+  animation: fishing-catch-reveal 560ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fishing-catch-banner { animation: none; }
+}
