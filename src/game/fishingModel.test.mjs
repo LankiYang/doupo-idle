@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   FISHING_SPOTS, initialFishingState, walkRoute, walkTarget, walkable,
   goFishing, castFishing, stepFishing, hookFishing, holdFishing, leaveFishing, readyAgain, facingToward,
+  fishingSafeZone,
 } from './fishingModel.ts'
 import { FISH_IDS, fishChances, fishFromRoll, FISH_SWIMMERS, swimmerPose } from './fishingSpecies.ts'
 
@@ -105,4 +106,23 @@ test('reeling requires controlled hold and release', () => {
   assert.ok(state.caughtAt > 0)
   const overload = stepFishing(holdFishing({ ...state, phase: 'reeling', tension: 0.99, until: 20000 }, true), 200, 0.05)
   assert.equal(overload.phase, 'escaped')
+})
+
+test('moving safe zones have the requested width, travel within bounds, and gate progress', () => {
+  const fight = { reelRate: 0.26, safeMax: 0.82, safeZoneWidth: 0.2, safeZoneSpeed: 0.8, safeZonePhase: 0 }
+  const start = fishingSafeZone(fight, 0)
+  const moved = fishingSafeZone(fight, 700)
+  assert.ok(Math.abs(start.max - start.min - 0.2) < 1e-12)
+  assert.ok(Math.abs(moved.max - moved.min - 0.2) < 1e-12)
+  assert.notEqual(moved.min, start.min)
+  assert.ok(Math.abs(fishingSafeZone(fight, 2500).min - start.min) < 1e-12)
+  assert.ok(start.min >= 0.2 && start.max <= fight.safeMax)
+  assert.ok(moved.min >= 0.2 && moved.max <= fight.safeMax)
+
+  const inside = stepFishing({ ...initialFishingState(), phase: 'reeling', holding: false,
+    tension: 0.3, progress: 0.5, until: 10000, fight: { ...fight, safeZoneWidth: 0.2 } }, 0, 0.05)
+  const outside = stepFishing({ ...initialFishingState(), phase: 'reeling', holding: false,
+    tension: 0.45, progress: 0.5, until: 10000, fight: { ...fight, safeZoneWidth: 0.2 } }, 0, 0.05)
+  assert.ok(inside.progress > 0.5)
+  assert.ok(outside.progress < 0.5)
 })

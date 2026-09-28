@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { FISH_IDS, fishChances, fishFromRoll } from './fishingSpecies.ts'
+import { fishingSafeZone, holdFishing, hookFishing, initialFishingState, stepFishing } from './fishingModel.ts'
 import { BAG_LIMIT, addCatch, buyBait, buyRod, canExchangeFish, castOdds, catchValue,
   effectiveBait, exchangeFish, initialFishingProfile, qualityChances, qualityFromRoll,
   restoreFishingProfile, rollCatch, sellCatch, sellUnlocked, serializeFishingProfile,
@@ -33,7 +34,29 @@ test('species and quality probabilities are normalized, ordered and change with 
   assert.equal(catchRoll.fishId, 'bream')
   assert.equal(catchRoll.quality, 'prized')
   assert.ok(catchRoll.fight.reelRate < rollCatch(base, 0, 0).fight.reelRate)
+  const common = rollCatch(base, 0, 0)
+  assert.ok(catchRoll.fight.safeZoneWidth < common.fight.safeZoneWidth)
+  assert.ok(catchRoll.fight.safeZoneSpeed > common.fight.safeZoneSpeed)
+  const baseRare = rollCatch(base, 0.99, 0)
+  const upgradedRare = rollCatch(upgraded, 0.99, 0)
+  const upgradedZone = fishingSafeZone(upgradedRare.fight, 0)
+  assert.ok(upgradedZone.min >= 0.2)
+  assert.ok(upgradedZone.max <= upgradedRare.fight.safeMax)
+  assert.ok(upgradedRare.fight.safeZoneWidth > baseRare.fight.safeZoneWidth)
   assert.ok(catchRoll.waitFactor < 1)
+})
+
+test('even the rarest fish remains catchable by tracking its moving safe zone', () => {
+  const { fishId, fight } = rollCatch(initialFishingProfile(), 0.99, 0.5)
+  assert.equal(fishId, 'bream')
+  let state = hookFishing({ ...initialFishingState(), phase: 'bite', until: 3200, fishId, fight }, 0)
+  for (let i = 0; i < 240 && state.phase === 'reeling'; i++) {
+    const now = i * 50
+    const zone = fishingSafeZone(fight, now)
+    state = holdFishing(state, state.tension < zone.max - 0.035)
+    state = stepFishing(state, now, 0.05)
+  }
+  assert.equal(state.phase, 'caught')
 })
 
 test('purchases, equipment, bait use and insufficient funds', () => {

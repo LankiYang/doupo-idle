@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react'
-import { Fish, Hand, MapPin, RotateCcw, Waves, X, ShoppingBag, Coins, Store } from 'lucide-react'
+import { Fish, Hand, MapPin, MousePointerClick, RotateCcw, Waves, X, ShoppingBag, Coins, Store } from 'lucide-react'
 import pondUrl from '../assets/sprites/fishing/pond.webp'
 import willowUrl from '../assets/sprites/fishing/willow.webp'
 import { AVATAR_URLS, WALK_URLS, FISHING_ACTION_URLS, FISH_URLS } from '../game/fishingAssets'
@@ -8,7 +8,7 @@ import { BAG_LIMIT, QUALITY, TRIAL_STORAGE_KEY, addCatch, restoreFishingProfile,
   serializeFishingProfile, useBait, type FishQuality, type FishingProfile } from '../game/fishingEconomy'
 import {
   FISHING_SPOTS, initialFishingState, goFishing, castFishing, hookFishing, holdFishing,
-  leaveFishing, readyAgain, stepFishing, type FishingState,
+  leaveFishing, readyAgain, stepFishing, fishingSafeZone, type FishingState,
 } from '../game/fishingModel'
 import { drawFishingScene, screenToPond, type FishingArt, type FishingCamera } from '../game/fishingScene'
 import { FishingBag, FishingShop } from './FishingPanels'
@@ -43,6 +43,7 @@ function readTrial(): FishingProfile {
 export default function FishingView() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [hud, setHud] = useState<FishingState>(initialFishingState)
+  const [clock, setClock] = useState(() => Date.now())
   const [profile, setProfile] = useState<FishingProfile>(readTrial)
   const [actionSpritesReady, setActionSpritesReady] = useState(false)
   const [panel, setPanel] = useState<'bag' | 'shop' | null>(null)
@@ -129,7 +130,8 @@ export default function FishingView() {
 
     const render = (time: number) => {
       const previous = stateRef.current
-      stateRef.current = stepFishing(previous, Date.now(), (time - lastFrame) / 1000)
+      const now = Date.now()
+      stateRef.current = stepFishing(previous, now, (time - lastFrame) / 1000)
       if (previous.phase !== 'caught' && stateRef.current.phase === 'caught' && stateRef.current.fishId) {
         const fishId = stateRef.current.fishId
         const quality = pendingQualityRef.current
@@ -141,6 +143,7 @@ export default function FishingView() {
       drawCurrentFrame()
       if (previous.phase !== stateRef.current.phase || time - lastHud > 100) {
         setHud(stateRef.current)
+        setClock(now)
         lastHud = time
       }
       frameId = requestAnimationFrame(render)
@@ -182,10 +185,13 @@ export default function FishingView() {
   }, [])
 
   const onPondPointer = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (stateRef.current.phase === 'bite') {
+    const phase = stateRef.current.phase
+    if (phase === 'bite') {
       change(state => hookFishing(state, Date.now()))
+      event.stopPropagation()
       return
     }
+    if (phase === 'reeling') return
     const rect = event.currentTarget.getBoundingClientRect()
     const point = screenToPond({ x: event.clientX - rect.left, y: event.clientY - rect.top }, cameraRef.current)
     const spot = FISHING_SPOTS.find(item => Math.hypot(item.stand.x - point.x, item.stand.y - point.y) < 49)
@@ -207,21 +213,44 @@ export default function FishingView() {
     setNotice('')
   }
   const hook = () => change(state => hookFishing(state, Date.now()))
-  const setHold = (held: boolean) => change(state => holdFishing(state, held))
+  const setHold = (held: boolean) => {
+    if (stateRef.current.phase === 'reeling' && stateRef.current.holding !== held) {
+      change(state => holdFishing(state, held))
+    }
+  }
   const busy = ['casting', 'waiting', 'bite', 'reeling'].includes(hud.phase)
   const spot = FISHING_SPOTS.find(item => item.id === (hud.pendingSpot ?? hud.spotId))
   const fishName = hud.fishId ? FISH_SPECIES[hud.fishId].name : '灵鱼'
+  const tensionPercent = Math.round(hud.tension * 100)
+  const progressPercent = Math.round(hud.progress * 100)
+  const safeZone = fishingSafeZone(hud.fight, clock)
+  const tensionStatus = hud.tension > safeZone.max
+    ? { label: '张力过高', hint: '立即松手，等张力回到安全区', tone: 'danger' }
+    : hud.tension < safeZone.min
+      ? { label: '追赶安全区', hint: hud.holding ? '继续按住，让张力追上移动安全区' : '按住收线，追上移动安全区', tone: 'low' }
+      : hud.holding
+        ? { label: '正在收线', hint: '保持绿区；接近红区就松手', tone: 'safe' }
+        : { label: '可以收线', hint: '按住收线，松手可降低张力', tone: 'safe' }
   const status = hud.phase === 'caught' ? `钓起一条${QUALITY[lastQuality].name}${fishName}` :
     hud.phase === 'moving' && !hud.pendingSpot ? '沿岸行走' : STATUS[hud.phase]
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col bg-dq-bg" data-fishing-phase={hud.phase} data-facing={hud.facing} data-avatar={profile.avatar}>
+    <section className="flex min-h-0 flex-1 flex-col bg-dq-bg" data-fishing-phase={hud.phase} data-facing={hud.facing} data-avatar={profile.avatar}
+      onPointerDown={event => {
+        if (stateRef.current.phase === 'bite') { hook(); return }
+        if (stateRef.current.phase === 'reeling' && !(event.target as HTMLElement).closest('button')) {
+          event.currentTarget.setPointerCapture(event.pointerId)
+          setHold(true)
+        }
+      }}
+      onPointerUp={() => setHold(false)}
+      onPointerCancel={() => setHold(false)}
+      onLostPointerCapture={() => setHold(false)}>
       <header className="flex shrink-0 items-center justify-between gap-3 border-b border-dq-border bg-dq-panel px-3 py-2 sm:px-5">
         <div className="min-w-0">
           <h1 className="text-base font-semibold text-dq-gold sm:text-lg">灵潭钓场</h1>
           <p className="truncate text-xs text-dq-dim">{spot ? `${spot.label} · ` : ''}{status}</p>
         </div>
-        <span className="shrink-0 border-l border-dq-border pl-3 text-xs text-dq-dim">本机试营业 · 不计主档</span>
       </header>
 
       <nav className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-dq-border bg-dq-panel px-2 py-1" aria-label="灵潭页面">
@@ -235,18 +264,31 @@ export default function FishingView() {
       </nav>
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        <canvas ref={canvasRef} onPointerDown={onPondPointer} aria-label="灵潭地图，点岸边移动，点钓位前往"
+        <canvas ref={canvasRef} onPointerDown={onPondPointer}
+          aria-label={hud.phase === 'bite' ? '鱼讯到了，点击池塘任意位置扬竿' : hud.phase === 'reeling' ? '按住钓场收线，松开降低张力' : '灵潭地图，点岸边移动，点钓位前往'}
           className="absolute inset-0 h-full w-full cursor-crosshair touch-none" />
         {hud.phase === 'bite' && (
-          <div className="dq-panel pointer-events-none absolute left-1/2 top-7 -translate-x-1/2 border-dq-fire px-4 py-1.5 text-sm font-bold text-dq-ember shadow-lg">
-            鱼讯！扬竿
+          <div role="status" aria-live="assertive" className="fishing-bite-callout pointer-events-none absolute left-1/2 top-4 -translate-x-1/2">
+            <MousePointerClick size={22} aria-hidden="true" />
+            <div className="min-w-0"><strong>鱼讯！点屏幕扬竿</strong><span>点击钓场任意位置或按空格</span></div>
           </div>
         )}
         {hud.phase === 'reeling' && (
-          <div className="dq-panel pointer-events-none absolute left-1/2 top-4 w-52 -translate-x-1/2 p-2 text-xs text-[#e8dcc8]">
-            <div className="mb-1 flex justify-between"><span>鱼线张力</span><span>{Math.round(hud.tension * 100)}%</span></div>
-            <div className="dq-slot h-2"><div className="h-full bg-dq-fire" style={{ width: `${hud.tension * 100}%` }} /></div>
-            <div className="dq-slot mt-1.5 h-1"><div className="h-full bg-dq-qing" style={{ width: `${hud.progress * 100}%` }} /></div>
+          <div className="fishing-reel-hud pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
+            <div className="fishing-reel-heading"><span><Fish size={16} aria-hidden="true" />控线收鱼</span><strong className={`is-${tensionStatus.tone}`}>{tensionStatus.label}</strong></div>
+            <div className="fishing-meter-block">
+              <div className="fishing-meter-label"><span>张力 <strong>{tensionPercent}%</strong></span><span className="fishing-meter-legend">{Math.round(safeZone.min * 100)}% - {Math.round(safeZone.max * 100)}% 安全</span></div>
+              <div className="fishing-tension-track" aria-hidden="true">
+                <div className="fishing-tension-safe" style={{ left: `${safeZone.min * 100}%`, width: `${(safeZone.max - safeZone.min) * 100}%` }} />
+                <div className={`fishing-tension-fill is-${tensionStatus.tone}`} style={{ width: `${tensionPercent}%` }} />
+                <div className="fishing-tension-limit" style={{ left: `${safeZone.max * 100}%` }} />
+              </div>
+            </div>
+            <div className="fishing-meter-block fishing-progress-block">
+              <div className="fishing-meter-label"><span>收鱼 <strong>{progressPercent}%</strong></span><span className="fishing-meter-legend">满格钓起</span></div>
+              <div className="fishing-progress-track" aria-hidden="true"><div className="fishing-progress-fill" style={{ width: `${progressPercent}%` }} /></div>
+            </div>
+            <p className="fishing-reel-hint" role="status">{tensionStatus.hint}</p>
           </div>
         )}
         {hud.phase === 'caught' && (
@@ -278,13 +320,13 @@ export default function FishingView() {
         <div className="flex min-h-11 items-center justify-between gap-3 border-t border-dq-border pt-2">
           <span className="min-w-0 truncate text-xs text-dq-dim sm:text-sm">
             {notice || (hud.phase === 'caught' ? `${QUALITY[lastQuality].name}${fishName}已收入背包` : hud.phase === 'escaped' ? '收好鱼线，再抛一竿' :
-              hud.phase === 'reeling' ? '按住收线，松开降张力' : hud.phase === 'roam' ? '点岸边移动，选择一个钓位' : status)}
+              hud.phase === 'reeling' ? '按住钓场或按钮收线，追随移动绿区' : hud.phase === 'bite' ? '点屏幕任意位置或按空格扬竿' : hud.phase === 'roam' ? '点岸边移动，选择一个钓位' : status)}
           </span>
           {hud.phase === 'ready' && <button type="button" disabled={!actionSpritesReady} onClick={() => cast()} className="dq-btn dq-btn-gold min-w-24"><Waves size={16} />{actionSpritesReady ? '抛竿' : '加载中'}</button>}
-          {hud.phase === 'bite' && <button type="button" onClick={hook} className="dq-btn dq-btn-fire min-w-24"><Fish size={16} />扬竿</button>}
+          {hud.phase === 'bite' && <button type="button" onClick={hook} className="dq-btn dq-btn-fire min-w-28"><MousePointerClick size={16} />点击扬竿</button>}
           {hud.phase === 'reeling' && <button type="button" aria-pressed={hud.holding}
             onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); setHold(true) }}
-            onPointerUp={() => setHold(false)} onPointerCancel={() => setHold(false)}
+            onPointerUp={() => setHold(false)} onPointerCancel={() => setHold(false)} onLostPointerCapture={() => setHold(false)}
             className="dq-btn dq-btn-gold min-w-24 select-none touch-none"><Hand size={16} />按住收线</button>}
           {(hud.phase === 'caught' || hud.phase === 'escaped') && <button type="button" onClick={() => cast(true)} className="dq-btn dq-btn-gold min-w-24"><RotateCcw size={16} />再抛一竿</button>}
         </div>

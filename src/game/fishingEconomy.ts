@@ -83,8 +83,15 @@ export function rollCatch(profile: FishingProfile, fishRoll: number, qualityRoll
   const odds = castOdds(profile)
   const fishId = fishFromRoll(fishRoll, odds.rareBoost)
   const rod = RODS[profile.rodId]
+  const difficulty = FISH_SPECIES[fishId].fight
+  const safeZoneWidth = Math.max(0.2, Math.min(0.42,
+    0.38 - (difficulty - 1) * 0.4 + (rod.safeMax - RODS.bamboo.safeMax) * 0.3))
+  const safeZoneSpeed = Math.max(0.38, Math.min(0.75,
+    0.42 + (difficulty - 1) * 0.55 - (rod.safeMax - RODS.bamboo.safeMax) * 0.35))
   return { fishId, quality: qualityFromRoll(qualityRoll, odds.qualityBonus),
-    fight: { reelRate: rod.reelRate / FISH_SPECIES[fishId].fight, safeMax: rod.safeMax },
+    fight: { reelRate: rod.reelRate / difficulty, safeMax: rod.safeMax,
+      safeZoneWidth, safeZoneSpeed,
+      safeZonePhase: (fishRoll * 0.73 + qualityRoll * 0.27) % 1 },
     waitFactor: odds.waitFactor }
 }
 

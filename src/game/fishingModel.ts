@@ -5,8 +5,33 @@ export const FISHING_WORLD = { width: 1408, height: 768 } as const
 export type Point = { x: number; y: number }
 export type Facing = 'north' | 'south' | 'west' | 'east'
 export type FishingPhase = 'roam' | 'moving' | 'ready' | 'casting' | 'waiting' | 'bite' | 'reeling' | 'caught' | 'escaped'
-export interface FishingFight { reelRate: number; safeMax: number }
-const DEFAULT_FIGHT: FishingFight = { reelRate: 0.26, safeMax: 0.82 }
+export interface FishingFight {
+  reelRate: number
+  safeMax: number
+  safeZoneWidth: number
+  safeZoneSpeed: number
+  safeZonePhase: number
+}
+const DEFAULT_FIGHT: FishingFight = {
+  reelRate: 0.26, safeMax: 0.82, safeZoneWidth: 0.56, safeZoneSpeed: 0.18, safeZonePhase: 0,
+}
+export interface FishingSafeZone { min: number; max: number }
+export const FISHING_SAFE_MIN = 0.2
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value))
+}
+
+/** The moving target used by both the simulation and the HUD. */
+export function fishingSafeZone(fight: FishingFight, now: number): FishingSafeZone {
+  const safeMax = clamp(fight.safeMax, FISHING_SAFE_MIN + 0.05, 0.98)
+  const width = clamp(fight.safeZoneWidth, 0.05, safeMax - FISHING_SAFE_MIN)
+  const travel = Math.max(0, safeMax - FISHING_SAFE_MIN - width)
+  const cycle = ((now / 1000 * Math.max(0, fight.safeZoneSpeed) + fight.safeZonePhase) % 2 + 2) % 2
+  const pingPong = cycle <= 1 ? cycle : 2 - cycle
+  const min = FISHING_SAFE_MIN + travel * pingPong
+  return { min, max: min + width }
+}
 
 export interface FishingSpot {
   id: string
@@ -113,6 +138,9 @@ export function castFishing(state: FishingState, now: number, waitMs: number, fi
     progress: 0, fishId, caughtAt: 0, fight: {
       reelRate: Math.max(0.15, Math.min(0.4, fight.reelRate)),
       safeMax: Math.max(0.75, Math.min(0.95, fight.safeMax)),
+      safeZoneWidth: Math.max(0.05, Math.min(0.8, fight.safeZoneWidth)),
+      safeZoneSpeed: Math.max(0, Math.min(2, fight.safeZoneSpeed)),
+      safeZonePhase: ((fight.safeZonePhase % 1) + 1) % 1,
     } }
 }
 
@@ -158,7 +186,9 @@ export function stepFishing(state: FishingState, now: number, deltaSeconds: numb
   if (state.phase === 'bite' && now > state.until) return { ...state, phase: 'escaped', holding: false }
   if (state.phase === 'reeling') {
     const tension = Math.max(0, state.tension + (state.holding ? 0.33 : -0.21) * dt + Math.sin(now / 420) * 0.025 * dt)
-    const progress = state.progress + (tension >= 0.2 && tension <= state.fight.safeMax ? state.fight.reelRate : -0.08) * dt
+    const safeZone = fishingSafeZone(state.fight, now)
+    const inSafeZone = tension >= safeZone.min && tension <= safeZone.max
+    const progress = state.progress + (inSafeZone ? state.fight.reelRate : -0.08) * dt
     if (tension >= 1 || now > state.until) return { ...state, phase: 'escaped', tension, progress, holding: false }
     if (progress >= 1) return { ...state, phase: 'caught', tension, progress: 1, holding: false, caughtAt: now }
     return { ...state, tension, progress: Math.max(0, progress) }

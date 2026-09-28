@@ -63,7 +63,7 @@ export function FishingShop({ profile, update }: { profile: FishingProfile; upda
   return <section className="dq-panel min-h-full rounded-none text-[#e8dcc8]" data-fishing-panel="shop" aria-label="灵潭渔具商店">
     <div className="mx-auto max-w-4xl space-y-5 px-3 py-4 pb-8 sm:px-6">
       <div className="border-b border-dq-border pb-3"><h2 className="dq-title text-lg">灵潭渔具</h2>
-        <p className="text-xs text-dq-dim">鱼券仅在本地试钓使用，不与主游戏灵金互通。</p></div>
+        <p className="text-xs text-dq-dim">鱼获、鱼券和渔具仅存当前标签页；关闭标签可能丢失，不与主游戏灵金互通。</p></div>
       <div><h3 className="mb-2 text-sm font-semibold text-dq-goldBright">人物</h3>
         <div className="flex gap-2">{(['male', 'female'] as AvatarId[]).map(id =>
           <button key={id} type="button" aria-pressed={profile.avatar === id} onClick={() => update(current => ({ ...current, avatar: id }))}
