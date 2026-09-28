@@ -1036,3 +1036,175 @@ body {
   html .sm\:text-xs       { font-size: 14px; line-height: 1.45; }
   html .dq-chip { font-size: 12.5px; }
 }
+@keyframes fishing-catch-reveal {
+  from { opacity: 0; transform: translate(-50%, 18px) scale(0.78); }
+  65% { opacity: 1; transform: translate(-50%, -6px) scale(1.06); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+
+.fishing-catch-banner {
+  transform: translateX(-50%);
+  animation: fishing-catch-reveal 560ms ease-out both;
+}
+
+.fishing-bite-callout,
+.fishing-reel-hud {
+  width: min(340px, calc(100vw - 16px));
+  border: 1px solid #9c692d;
+  background: linear-gradient(180deg, rgba(42, 29, 16, 0.96), rgba(22, 17, 12, 0.96));
+  box-shadow: 0 8px 24px rgba(9, 7, 5, 0.48), inset 0 1px 0 rgba(255, 231, 179, 0.12);
+}
+
+.fishing-bite-callout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  color: #ffd98a;
+  animation: fishing-bite-pulse 1200ms ease-in-out infinite;
+}
+
+.fishing-bite-callout > svg {
+  flex: 0 0 auto;
+  color: #ff9b55;
+}
+
+.fishing-bite-callout strong,
+.fishing-bite-callout span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fishing-bite-callout strong {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.fishing-bite-callout span {
+  margin-top: 2px;
+  color: #c4ab86;
+  font-size: 11px;
+}
+
+.fishing-reel-hud {
+  padding: 8px 11px;
+  color: #eadfc9;
+}
+
+.fishing-reel-heading,
+.fishing-meter-label,
+.fishing-tension-scale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fishing-reel-heading {
+  color: #ffe4a6;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.fishing-reel-heading span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fishing-reel-heading strong,
+.fishing-meter-label strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.fishing-reel-heading strong.is-safe,
+.fishing-tension-fill.is-safe { color: #9fe29f; }
+.fishing-reel-heading strong.is-low,
+.fishing-tension-fill.is-low { color: #f0c16a; }
+.fishing-reel-heading strong.is-danger,
+.fishing-tension-fill.is-danger { color: #ff8a65; }
+
+.fishing-reel-hint {
+  margin: 6px 0 0;
+  color: #e4cfaa;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.fishing-meter-block + .fishing-meter-block { margin-top: 5px; }
+
+.fishing-meter-label {
+  margin-bottom: 2px;
+  color: #cdbb9c;
+  font-size: 11px;
+}
+
+.fishing-meter-label strong { color: #fff0c4; font-variant-numeric: tabular-nums; }
+.fishing-meter-legend { color: #ab997d; font-size: 10px; }
+
+.fishing-tension-track,
+.fishing-progress-track {
+  position: relative;
+  height: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(241, 220, 169, 0.28);
+  border-radius: 3px;
+  background: #171713;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+.fishing-tension-safe,
+.fishing-tension-fill,
+.fishing-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  transition: width 120ms linear;
+}
+
+.fishing-tension-safe {
+  z-index: 2;
+  transition: left 100ms linear, width 100ms linear;
+  border: 1px solid rgba(166, 232, 139, 0.8);
+  background: rgba(104, 182, 88, 0.35);
+}
+
+.fishing-tension-fill {
+  min-width: 2px;
+  z-index: 1;
+  background: #8fca7e;
+}
+
+.fishing-tension-fill.is-low { background: #d7a74f; }
+.fishing-tension-fill.is-danger { background: #d95d3d; }
+
+.fishing-tension-limit {
+  position: absolute;
+  inset: -2px auto -2px 0;
+  z-index: 3;
+  transition: left 100ms linear;
+  border-left: 2px solid rgba(255, 232, 172, 0.9);
+  box-shadow: 0 0 7px rgba(255, 214, 120, 0.7);
+}
+
+.fishing-progress-track {
+  height: 10px;
+  background: repeating-linear-gradient(90deg, #201b15 0 28px, #2e261b 28px 30px);
+}
+
+.fishing-progress-fill {
+  min-width: 0;
+  background: linear-gradient(90deg, #9d6d2f, #e2b34e);
+  transition: width 180ms ease-out;
+}
+
+@keyframes fishing-bite-pulse {
+  0%, 100% { box-shadow: 0 8px 24px rgba(9, 7, 5, 0.48), 0 0 0 rgba(255, 126, 69, 0); }
+  50% { box-shadow: 0 8px 24px rgba(9, 7, 5, 0.48), 0 0 18px rgba(255, 126, 69, 0.28); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fishing-catch-banner { animation: none; }
+  .fishing-bite-callout { animation: none; }
+}

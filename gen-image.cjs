@@ -6,6 +6,7 @@
 //   node gen-image.cjs --template="角色·萧炎"        → 用内置模板生成
 //   node gen-image.cjs --batch batch.json           → 批量生成（json: [{prompt, out}...]）
 //   node gen-image.cjs "提示词" --model=xxx          → 临时换模型（默认见下方 MODEL）
+//   node gen-image.cjs "提示词" --reference=ref.png   → 以本地图像为造型参考
 //
 // 走 cloudsway 网关的 **OpenAI 兼容端点** `/v1/chat/completions`，模型 MaaS_Ge_3.1_flash_image。
 // （2026-09-17 从旧的 Gemini 原生端点 `/v1/ai/<id>/generateContent` 迁移过来。）
@@ -110,13 +111,24 @@ async function saveImage(ref, outputPath) {
   return buf
 }
 
+function referenceContent(file) {
+  const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' }[path.extname(file).toLowerCase()]
+  if (!mime) throw new Error('参考图只支持 PNG、JPEG、WebP')
+  const image = fs.readFileSync(file)
+  if (!image.length) throw new Error('参考图为空')
+  return { type: 'image_url', image_url: { url: `data:${mime};base64,${image.toString('base64')}` } }
+}
+
 function generateImage(prompt, outputPath, opts = {}) {
   const model = opts.model || MODEL
+  const content = opts.reference
+    ? [{ type: 'text', text: prompt }, referenceContent(opts.reference)]
+    : prompt
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify({
       temperature: 1,
       model,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content }],
       stream: false,
     })
     const options = {
@@ -166,7 +178,11 @@ async function main() {
 
   // --model=xxx 临时换模型（默认见顶部 MODEL）
   const mi = argv.findIndex(a => a.startsWith('--model='))
-  const opts = mi >= 0 ? { model: argv[mi].slice('--model='.length) } : {}
+  const ri = argv.findIndex(a => a.startsWith('--reference='))
+  const opts = {
+    ...(mi >= 0 ? { model: argv[mi].slice('--model='.length) } : {}),
+    ...(ri >= 0 ? { reference: argv[ri].slice('--reference='.length) } : {}),
+  }
 
   // --list 显示模板
   if (argv.includes('--list')) {
@@ -175,6 +191,7 @@ async function main() {
     console.log('\n用法示例：')
     console.log('  node gen-image.cjs --template="怪物·野猪王"')
     console.log('  node gen-image.cjs "自定义提示词" -o src/assets/sprites/generated/xxx.png')
+    console.log('  node gen-image.cjs "保持参考图造型，只改变姿势" --reference=ref.png -o output.png')
     console.log(`\n当前模型：${MODEL}（用 --model=xxx 临时覆盖）`)
     return
   }
@@ -218,7 +235,7 @@ async function main() {
 
   console.log(`生成: ${JSON.stringify(prompt).slice(0, 80)}…`)
   try { await generateImage(prompt, outPath, opts) }
-  catch (e) { console.log(`❌ ${e.message}`) }
+  catch (e) { console.log(`❌ ${e.message}`); process.exitCode = 1 }
 }
 
-main().catch(console.error)
+main().catch(e => { console.error(e); process.exitCode = 1 })

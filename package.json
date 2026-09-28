@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:art": "node --test sprite-sheet.test.cjs sprite-actor-atlas.test.cjs",
+    "test:fishing": "node --experimental-strip-types --test src/game/fishingModel.test.mjs src/game/fishingEconomy.test.mjs src/game/fishingAnimation.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

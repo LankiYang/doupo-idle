@@ -84,15 +84,21 @@ function colorDist(c1, c2) {
 }
 
 // ── 主体抠图流程 ──
-function removeBackground(file, opts) {
+function removeBackground(fileOrImage, opts) {
   const { T_INNER = 36, T_OUTER = 72 } = opts ?? {}
-  const img = decodePNG(file)
+  const img = typeof fileOrImage === 'string' ? decodePNG(fileOrImage) : fileOrImage
   const { width: W, height: H, channels: ch, px } = img
   const get = (i) => [px[i], px[i + 1], px[i + 2]]
 
-  // 1) 背景色 = 四角平均
-  const corners = [get(0), get((W - 1) * ch), get((H - 1) * W * ch), get(((H - 1) * W + W - 1) * ch)]
-  const bg = [0, 1, 2].map(k => Math.round(corners.reduce((s, c) => s + c[k], 0) / 4))
+  // 1) 从内缩的四角取背景中位数，避开生成图最外侧的边框/扫描线
+  const inset = Math.max(1, Math.min(8, Math.floor(Math.min(W, H) / 32)))
+  const xs = [inset, Math.min(W - 1, inset * 2), Math.max(0, W - 1 - inset), Math.max(0, W - 1 - inset * 2)]
+  const ys = [inset, Math.min(H - 1, inset * 2), Math.max(0, H - 1 - inset), Math.max(0, H - 1 - inset * 2)]
+  const samples = [0, 1, 2, 3].flatMap(yi => [0, 1, 2, 3].map(xi => get((ys[yi] * W + xs[xi]) * ch)))
+  const bg = [0, 1, 2].map(k => {
+    const values = samples.map(c => c[k]).sort((a, b) => a - b)
+    return Math.round((values[7] + values[8]) / 2)
+  })
 
   // 2) 与背景色相近的像素标记为候选背景（并计算距离）
   const N = W * H
@@ -139,40 +145,42 @@ function removeBackground(file, opts) {
 }
 
 // ── 入口 ──
-const targets = process.argv.slice(2)
-const SPRITES = 'C:/Users/admin/Desktop/咸鱼之王/doupo-idle/src/assets/sprites'
-let files = []
-if (targets.length > 0) {
-  files = targets
-} else {
-  const walk = (d) => {
-    for (const f of fs.readdirSync(d)) {
-      const p = path.join(d, f)
-      if (fs.statSync(p).isDirectory()) walk(p)
-      else if (f.endsWith('.png')) files.push(p)
-    }
-  }
-  walk(SPRITES)
-}
+module.exports = { decodePNG, encodePNG, removeBackground }
 
-for (const f of files) {
-  try {
-    // 若已存在 .bak（原始未抠图版本），从 .bak 重新处理，避免二次叠加
-    const src = fs.existsSync(f + '.bak') ? f + '.bak' : f
-    const { width, height, rgba } = removeBackground(src)
-    // 备份原图（仅首次）
-    if (!fs.existsSync(f + '.bak')) fs.copyFileSync(f, f + '.bak')
-    // 覆盖
-    fs.writeFileSync(f, encodePNG(width, height, rgba))
-    // 统计 alpha 分布
-    const N = width * height
-    let transparent = 0, semi = 0
-    for (let i = 3; i < rgba.length; i += 4) {
-      if (rgba[i] === 0) transparent++
-      else if (rgba[i] < 255) semi++
+if (require.main === module) {
+  const targets = process.argv.slice(2)
+  const sprites = path.join(__dirname, 'src/assets/sprites')
+  const files = []
+  if (targets.length > 0) {
+    files.push(...targets)
+  } else {
+    const walk = (d) => {
+      for (const f of fs.readdirSync(d)) {
+        const p = path.join(d, f)
+        if (fs.statSync(p).isDirectory()) walk(p)
+        else if (f.endsWith('.png')) files.push(p)
+      }
     }
-    console.log(`✅ ${path.basename(f)} — 全透明 ${(transparent / N * 100).toFixed(1)}% · 半透明边缘 ${(semi / N * 100).toFixed(1)}% · ${(fs.statSync(src).size / 1024).toFixed(0)}KB → ${(fs.statSync(f).size / 1024).toFixed(0)}KB`)
-  } catch (e) {
-    console.log(`❌ ${path.basename(f)}: ${e.message}`)
+    walk(sprites)
+  }
+
+  for (const f of files) {
+    try {
+      // 若已存在 .bak（原始未抠图版本），从 .bak 重新处理，避免二次叠加
+      const src = fs.existsSync(f + '.bak') ? f + '.bak' : f
+      const { width, height, rgba } = removeBackground(src)
+      if (!fs.existsSync(f + '.bak')) fs.copyFileSync(f, f + '.bak')
+      fs.writeFileSync(f, encodePNG(width, height, rgba))
+      const N = width * height
+      let transparent = 0, semi = 0
+      for (let i = 3; i < rgba.length; i += 4) {
+        if (rgba[i] === 0) transparent++
+        else if (rgba[i] < 255) semi++
+      }
+      console.log(`✅ ${path.basename(f)} — 全透明 ${(transparent / N * 100).toFixed(1)}% · 半透明边缘 ${(semi / N * 100).toFixed(1)}% · ${(fs.statSync(src).size / 1024).toFixed(0)}KB → ${(fs.statSync(f).size / 1024).toFixed(0)}KB`)
+    } catch (e) {
+      console.log(`❌ ${path.basename(f)}: ${e.message}`)
+      process.exitCode = 1
+    }
   }
 }
